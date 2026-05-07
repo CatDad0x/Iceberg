@@ -91,34 +91,4 @@ This is the economics that makes it viable as a public good at scale.
 
 ---
 
-## Running Locally
-
-```bash
-git clone https://github.com/CatDad0x/iceberg
-cd iceberg
-npm install
-```
-
-Create a `.env.local` file:
-
-```
-ETHEREUM_RPC_URL=https://eth.llamarpc.com
-BASE_RPC_URL=https://mainnet.base.org
-ETHERSCAN_API_KEY=your_key_here
-BASESCAN_API_KEY=your_key_here
-ANTHROPIC_API_KEY=your_key_here
-```
-
-Then:
-
-```bash
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
-
-Get free API keys at [etherscan.io](https://etherscan.io/apis), [basescan.org](https://basescan.org/apis), and [console.anthropic.com](https://console.anthropic.com).
-
----
-
 Built by [@CatDad0x](https://github.com/CatDad0x)
