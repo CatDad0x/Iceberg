@@ -1,0 +1,1430 @@
+import { NextRequest, NextResponse } from "next/server";
+import { ethers } from "ethers";
+import Anthropic from "@anthropic-ai/sdk";
+import {
+  AssetType,
+  Chain,
+  findKnownAsset,
+  findPoolFactory,
+  findProtocolContract,
+  findTimelock,
+  getPoolChecks,
+  PROXY_SLOTS,
+  PoolType,
+} from "../../lib/registry";
+import { findProtocolFlow } from "../../lib/protocol-flows";
+import { buildCacheKey, getCached, putCached } from "../../lib/learned-cache";
+
+const RPCS: Record<Chain, string> = {
+  ethereum: process.env.ETHEREUM_RPC_URL ?? "https://eth.llamarpc.com",
+  base: process.env.BASE_RPC_URL ?? "https://base.llamarpc.com",
+};
+
+// Etherscan V2 unified API — single endpoint, chainid selects the network
+const ETHERSCAN_V2_API = "https://api.etherscan.io/v2/api";
+const CHAIN_IDS: Record<Chain, number> = { ethereum: 1, base: 8453 };
+
+const ETHERSCAN_KEYS: Record<Chain, string> = {
+  ethereum: process.env.ETHERSCAN_API_KEY ?? "",
+  base: process.env.BASESCAN_API_KEY ?? "",
+};
+
+function etherscanUrl(chain: Chain, params: Record<string, string>): string {
+  const key = ETHERSCAN_KEYS[chain];
+  const qs = new URLSearchParams({ chainid: String(CHAIN_IDS[chain]), ...params, ...(key ? { apikey: key } : {}) });
+  return `${ETHERSCAN_V2_API}?${qs}`;
+}
+
+type RiskLevel = "critical" | "high" | "medium" | "low" | "info";
+type YIFFCategory = "Protocol Security" | "Pool Security" | "Governance & Control" | "Position Economics";
+
+function normalizeCategory(raw: string): YIFFCategory {
+  const s = raw.toLowerCase().trim();
+  if (s.includes("pool") || s.includes("liquidity") || s.includes("withdrawal") || s.includes("exit")) return "Pool Security";
+  if (s.includes("governance") || s.includes("control") || s.includes("admin")) return "Governance & Control";
+  if (s.includes("position") || s.includes("economics") || s.includes("market") || s.includes("financial") || s.includes("token risk") || s.includes("yield") || s.includes("impermanent")) return "Position Economics";
+  // protocol / smart contract / frontend / phishing / any unmatched → Protocol Security
+  return "Protocol Security";
+}
+
+type Finding = {
+  title: string;
+  detail: string;
+  level: RiskLevel;
+};
+
+type ContractFunctions = {
+  trading: string[];
+  poolSetup: string[];
+  admin: string[];
+  read: string[];
+};
+
+type ContractRisk = {
+  address: string;
+  label: string;
+  poolType?: string;
+  findings: Finding[];
+  isProxy?: boolean;
+  implementation?: string;
+  proxyAdmin?: string;
+  functions?: ContractFunctions;
+  deployedAt?: number;
+  creatorAddress?: string;
+  isVerified?: boolean;
+  poolReserves?: {
+    token0Symbol: string;
+    token0Amount: string;
+    token1Symbol: string;
+    token1Amount: string;
+  };
+};
+
+type TrustLevel = "trusted" | "caution" | "danger";
+
+type AssetRisk = {
+  address: string;
+  symbol: string;
+  name: string;
+  assetType: string;
+  trustLevel: TrustLevel;
+  riskNotes: string[];
+};
+
+// ─── Etherscan helpers ───────────────────────────────────────────────────────
+
+async function getABI(address: string, chain: Chain): Promise<string | null> {
+  const url = etherscanUrl(chain, { module: "contract", action: "getabi", address });
+  try {
+    const res = await fetch(url);
+    const json = await res.json();
+    if (json.status === "1") return json.result;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function getContractSource(address: string, chain: Chain): Promise<string | null> {
+  const url = etherscanUrl(chain, { module: "contract", action: "getsourcecode", address });
+  try {
+    const res = await fetch(url);
+    const json = await res.json();
+    if (json.status === "1" && json.result[0]?.SourceCode) {
+      return json.result[0].SourceCode.slice(0, 8000);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Contract meta (age + creator) ───────────────────────────────────────────
+
+async function getContractMeta(
+  address: string,
+  chain: Chain,
+): Promise<{ deployedAt?: number; creatorAddress?: string }> {
+  // Primary: getcontractcreation (works for most contracts, returns timestamp directly)
+  try {
+    const url = etherscanUrl(chain, { module: "contract", action: "getcontractcreation", contractaddresses: address });
+    const json = await fetch(url, { signal: AbortSignal.timeout(5000) }).then((r) => r.json());
+    if (json.status === "1" && json.result?.[0]) {
+      const { contractCreator, txHash } = json.result[0] as { contractCreator: string; txHash: string };
+      try {
+        const txUrl = etherscanUrl(chain, { module: "proxy", action: "eth_getTransactionByHash", txhash: txHash });
+        const txJson = await fetch(txUrl, { signal: AbortSignal.timeout(5000) }).then((r) => r.json());
+        const blockHex = txJson?.result?.blockNumber;
+        if (blockHex) {
+          const blockUrl = etherscanUrl(chain, { module: "proxy", action: "eth_getBlockByNumber", tag: blockHex, boolean: "false" });
+          const blockJson = await fetch(blockUrl, { signal: AbortSignal.timeout(5000) }).then((r) => r.json());
+          const tsHex = blockJson?.result?.timestamp;
+          if (tsHex) return { deployedAt: parseInt(tsHex, 16), creatorAddress: contractCreator };
+        }
+      } catch { /* ignore */ }
+      return { creatorAddress: contractCreator };
+    }
+  } catch { /* fall through to backup */ }
+
+  // Fallback: txlistinternal gives the CREATE call with timestamp directly
+  try {
+    const url = etherscanUrl(chain, { module: "account", action: "txlistinternal", address, startblock: "0", endblock: "99999999", page: "1", offset: "1", sort: "asc" });
+    const json = await fetch(url, { signal: AbortSignal.timeout(5000) }).then((r) => r.json());
+    if (json.status === "1" && json.result?.[0]) {
+      const row = json.result[0] as { timeStamp: string; from: string };
+      return { deployedAt: Number(row.timeStamp), creatorAddress: row.from };
+    }
+  } catch { /* ignore */ }
+
+  return {};
+}
+
+// ─── Pool reserves ────────────────────────────────────────────────────────────
+
+async function getPoolReserves(
+  poolAddress: string,
+  pair: { token0: string; token1: string; token0Symbol: string; token1Symbol: string },
+  chain: Chain,
+  _provider: ethers.JsonRpcProvider,
+): Promise<ContractRisk["poolReserves"]> {
+  // Use a fresh provider so reserves fetch doesn't compete with the main analysis connection
+  const freshProvider = new ethers.JsonRpcProvider(RPCS[chain]);
+  const erc20Abi = ["function balanceOf(address) view returns (uint256)", "function decimals() view returns (uint8)"];
+
+  const fetchBalance = async (tokenAddr: string): Promise<{ balance: bigint; decimals: number } | null> => {
+    const known = findKnownAsset(tokenAddr, chain);
+    const token = new ethers.Contract(tokenAddr, erc20Abi, freshProvider);
+    // Retry twice with delay — public RPCs often fail on first concurrent call
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 300 * attempt));
+        const balance: bigint = await token.balanceOf(poolAddress);
+        const dec = known?.decimals ?? Number(await token.decimals().catch(() => 18));
+        return { balance, decimals: dec };
+      } catch { /* retry */ }
+    }
+    return null;
+  };
+
+  // Fetch sequentially to avoid saturating public RPC with concurrent calls
+  const r0 = await fetchBalance(pair.token0);
+  const r1 = await fetchBalance(pair.token1);
+  if (!r0 || !r1) return undefined;
+
+  const fmt = (bal: bigint, dec: number) => {
+    const n = Number(ethers.formatUnits(bal, dec));
+    if (n >= 1e6) return `${(n / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 })}M`;
+    if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  };
+
+  return {
+    token0Symbol: pair.token0Symbol,
+    token0Amount: fmt(r0.balance, r0.decimals),
+    token1Symbol: pair.token1Symbol,
+    token1Amount: fmt(r1.balance, r1.decimals),
+  };
+}
+
+// ─── Proxy detection ─────────────────────────────────────────────────────────
+
+async function detectProxy(
+  address: string,
+  provider: ethers.JsonRpcProvider
+): Promise<{ isProxy: boolean; implementation?: string; admin?: string }> {
+  try {
+    const implSlot = await provider.getStorage(address, PROXY_SLOTS.implementation);
+    const adminSlot = await provider.getStorage(address, PROXY_SLOTS.admin);
+
+    const impl = implSlot !== ethers.ZeroHash
+      ? "0x" + implSlot.slice(-40)
+      : undefined;
+    const admin = adminSlot !== ethers.ZeroHash
+      ? "0x" + adminSlot.slice(-40)
+      : undefined;
+
+    return { isProxy: !!impl && impl !== "0x" + "0".repeat(40), implementation: impl, admin };
+  } catch {
+    return { isProxy: false };
+  }
+}
+
+// ─── Contract state reader ────────────────────────────────────────────────────
+
+async function readContractState(
+  address: string,
+  abi: string,
+  provider: ethers.JsonRpcProvider,
+  poolType: PoolType
+): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  let parsedAbi: ethers.InterfaceAbi;
+
+  try {
+    parsedAbi = JSON.parse(abi);
+  } catch {
+    return findings;
+  }
+
+  const contract = new ethers.Contract(address, parsedAbi, provider);
+  const checks = getPoolChecks(poolType);
+
+  for (const check of checks) {
+    try {
+      const result = await contract[check.functionName]();
+      const valueStr = result?.toString() ?? "";
+
+      if (check.functionName === "is_killed" && result === true) {
+        findings.push({ title: "Pool is killed", detail: check.riskIfTrue ?? check.description, level: "critical" });
+      } else if (check.functionName === "isAlive" && result === false) {
+        findings.push({ title: "Gauge is dead", detail: check.riskIfFalse ?? check.description, level: "critical" });
+      } else if (check.functionName === "future_A") {
+        const currentA = await contract["A"]().catch(() => null);
+        if (currentA && result.toString() !== currentA.toString()) {
+          findings.push({
+            title: "A parameter ramp in progress",
+            detail: `A is changing from ${currentA} → ${result}. This affects pool pricing mechanics.`,
+            level: "high",
+          });
+        }
+      } else if ((check.functionName === "owner" || check.functionName === "getOwner") && valueStr && valueStr !== ethers.ZeroAddress) {
+        const code = await provider.getCode(valueStr).catch(() => "0x");
+        const isEOA = code === "0x";
+        const timelock = findTimelock(valueStr, "ethereum") ?? findTimelock(valueStr, "base");
+
+        if (isEOA) {
+          findings.push({
+            title: "Admin key is an EOA",
+            detail: `Owner ${valueStr.slice(0, 10)}... is a plain wallet, not a multisig or timelock. Highest centralisation risk.`,
+            level: "critical",
+          });
+        } else if (timelock) {
+          findings.push({
+            title: `Owner is a timelock (${timelock.protocol})`,
+            detail: `Delay: ${timelock.delaySeconds / 3600}h. Changes must be queued. some protection for users.`,
+            level: "low",
+          });
+        } else {
+          findings.push({
+            title: "Admin key is a contract",
+            detail: `Owner is a contract at ${valueStr.slice(0, 10)}.... could be a multisig, DAO, or unknown contract.`,
+            level: "medium",
+          });
+        }
+      } else if (check.functionName === "getPausedState") {
+        const paused = result?.paused ?? result;
+        if (paused === true) {
+          findings.push({ title: "Pool is paused", detail: "No swaps or joins are currently possible.", level: "critical" });
+        }
+      } else if (valueStr && check.riskIfTrue) {
+        findings.push({ title: check.description, detail: `Value: ${valueStr}. ${check.riskIfTrue}`, level: "medium" });
+      }
+    } catch {
+      // Function may not exist on this contract. skip silently
+    }
+  }
+
+  return findings;
+}
+
+// ─── Universal admin / ownership checks (run on every contract) ─────────────
+
+const UNIVERSAL_ADMIN_ABI = [
+  "function owner() view returns (address)",
+  "function getOwner() view returns (address)",
+  "function admin() view returns (address)",
+  "function pendingOwner() view returns (address)",
+  "function paused() view returns (bool)",
+];
+
+async function runUniversalAdminChecks(
+  address: string,
+  provider: ethers.JsonRpcProvider,
+  chain: Chain
+): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  const contract = new ethers.Contract(address, UNIVERSAL_ADMIN_ABI, provider);
+
+  // Try to resolve "who controls this contract" via owner() / getOwner() / admin()
+  let adminAddr: string | null = null;
+  let adminSource = "";
+  for (const fn of ["owner", "getOwner", "admin"] as const) {
+    try {
+      const result: string = await contract[fn]();
+      if (result && result !== ethers.ZeroAddress) {
+        adminAddr = result;
+        adminSource = fn;
+        break;
+      }
+    } catch {
+      // function doesn't exist on this contract. try next
+    }
+  }
+
+  if (adminAddr) {
+    const code = await provider.getCode(adminAddr).catch(() => "0x");
+    const isEOA = code === "0x";
+    const timelock = findTimelock(adminAddr, chain);
+
+    if (timelock) {
+      findings.push({
+        title: `Admin is a timelock (${timelock.protocol})`,
+        detail: `${adminSource}() = ${adminAddr.slice(0, 10)}.... delay ${timelock.delaySeconds / 3600}h. Changes must be queued, giving users time to exit.`,
+        level: "low",
+      });
+    } else if (isEOA) {
+      findings.push({
+        title: "Admin is an EOA (single wallet)",
+        detail: `${adminSource}() = ${adminAddr.slice(0, 10)}... is a plain wallet, not a multisig or timelock. Highest centralisation risk. that one wallet can change contract behaviour instantly.`,
+        level: "critical",
+      });
+    } else {
+      findings.push({
+        title: "Admin is a contract (multisig / DAO / unknown)",
+        detail: `${adminSource}() = ${adminAddr.slice(0, 10)}... is a contract. Could be a Gnosis Safe multisig, DAO governor, or another upgradeable contract. needs further inspection.`,
+        level: "medium",
+      });
+    }
+  }
+
+  // Pending ownership transfer
+  try {
+    const pending: string = await contract.pendingOwner();
+    if (pending && pending !== ethers.ZeroAddress) {
+      findings.push({
+        title: "Pending ownership transfer",
+        detail: `pendingOwner() = ${pending.slice(0, 10)}.... a transfer of control is queued and awaiting acceptance.`,
+        level: "high",
+      });
+    }
+  } catch {
+    // no pendingOwner. fine
+  }
+
+  // Paused state
+  try {
+    const isPaused: boolean = await contract.paused();
+    if (isPaused === true) {
+      findings.push({
+        title: "Contract is currently paused",
+        detail: "paused() = true. interactions are currently disabled. Existing positions may be stuck until admin unpauses.",
+        level: "critical",
+      });
+    }
+  } catch {
+    // no paused(). fine
+  }
+
+  return findings;
+}
+
+// ─── Pool type auto-detection (for unknown pool addresses) ───────────────────
+
+const POOL_AUTODETECT_ABI = [
+  "function factory() view returns (address)",
+  "function fee() view returns (uint24)",
+  "function tickSpacing() view returns (int24)",
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+];
+
+// Resolve a token address to its symbol. checks the static registry first,
+// then falls back to reading symbol() on chain.
+async function resolveTokenSymbol(
+  address: string,
+  chain: Chain,
+  provider: ethers.JsonRpcProvider
+): Promise<string> {
+  const known = findKnownAsset(address, chain);
+  if (known) return known.symbol;
+  try {
+    const c = new ethers.Contract(address, ["function symbol() view returns (string)"], provider);
+    const sym = await c.symbol();
+    if (sym && typeof sym === "string") return sym;
+  } catch {
+    // ignore
+  }
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
+
+function describeTickSpacing(ts: number): string {
+  if (ts <= 1) return "very narrow tick spacing. designed for tightly-pegged stable pairs";
+  if (ts <= 10) return "narrow tick spacing. designed for stable pairs (e.g. USDC/USDT)";
+  if (ts <= 60) return "medium tick spacing. typical for blue-chip pairs (e.g. ETH/USDC)";
+  if (ts <= 200) return "wide tick spacing. typical for volatile pairs";
+  return "very wide tick spacing. typical for highly volatile pairs";
+}
+
+async function autoDetectPoolType(
+  address: string,
+  provider: ethers.JsonRpcProvider,
+  chain: Chain
+): Promise<{
+  poolType: PoolType;
+  label?: string;
+  findings: Finding[];
+  pair?: { token0Symbol: string; token1Symbol: string; token0: string; token1: string };
+  feePercent?: number;
+}> {
+  const findings: Finding[] = [];
+  const contract = new ethers.Contract(address, POOL_AUTODETECT_ABI, provider);
+
+  // Always try to read pool state — even if factory() fails we can still get token0/token1/fee
+  let factoryAddr: string | null = null;
+  try {
+    factoryAddr = await contract.factory();
+  } catch {
+    // factory() not available — retry once after a short pause
+    await new Promise((r) => setTimeout(r, 300));
+    try { factoryAddr = await contract.factory(); } catch { /* not a pool */ }
+  }
+
+  const knownFactory = factoryAddr ? findPoolFactory(factoryAddr, chain) : null;
+
+  // Small pause before token reads to let the RPC recover from factory() call
+  await new Promise((r) => setTimeout(r, 150));
+
+  // Read fee/tickSpacing and then token0/token1 sequentially to avoid overloading public RPCs
+  const [fee, tickSpacing] = await Promise.all([
+    contract.fee().catch(() => null),
+    contract.tickSpacing().catch(() => null),
+  ]);
+
+  // token0/token1 are critical for pair display — retry with delay on failure
+  const readWithRetry = async (fn: () => Promise<string>): Promise<string | null> => {
+    try { return await fn(); } catch { /* fall through */ }
+    await new Promise((r) => setTimeout(r, 300));
+    try { return await fn(); } catch { return null; }
+  };
+  const token0 = await readWithRetry(() => contract.token0());
+  const token1 = await readWithRetry(() => contract.token1());
+
+  let pair:
+    | { token0Symbol: string; token1Symbol: string; token0: string; token1: string }
+    | undefined;
+  if (token0 && token1) {
+    const [s0, s1] = await Promise.all([
+      resolveTokenSymbol(token0, chain, provider),
+      resolveTokenSymbol(token1, chain, provider),
+    ]);
+    pair = { token0Symbol: s0, token1Symbol: s1, token0, token1 };
+    findings.push({
+      title: `Pool pair: ${s0} ↔ ${s1}`,
+      detail: `This pool swaps between ${s0} and ${s1}. Your LP position holds a mix of both depending on the price.`,
+      level: "info",
+    });
+  }
+
+  // If we couldn't identify the factory, return unknown but still include pair + fee
+  if (!knownFactory) {
+    const earlyFee = fee !== null ? Number(fee) / 10000 : undefined;
+    return { poolType: "unknown", findings, pair, feePercent: earlyFee };
+  }
+
+  let feePercent: number | undefined;
+  if (fee !== null) {
+    feePercent = Number(fee) / 10000;
+    findings.push({
+      title: `Fee tier: ${feePercent}%`,
+      detail:
+        feePercent <= 0.05
+          ? `${feePercent}% fee. lowest tier, used for tightly correlated assets like stablecoin pairs or ETH/wrapped-ETH. Earns less per swap; only viable with high volume.`
+          : feePercent <= 0.3
+            ? `${feePercent}% fee. standard tier for major pairs.`
+            : `${feePercent}% fee. high tier, typical for exotic or low-liquidity pairs.`,
+      level: "info",
+    });
+  }
+
+  if (tickSpacing !== null) {
+    findings.push({
+      title: `Price-range setting`,
+      detail: `${describeTickSpacing(Number(tickSpacing))}. (technical: tickSpacing=${tickSpacing})`,
+      level: "info",
+    });
+  }
+
+  return {
+    poolType: knownFactory.poolType,
+    label: `${knownFactory.name} pool`,
+    findings,
+    pair,
+    feePercent,
+  };
+}
+
+// ─── Function categorizer ────────────────────────────────────────────────────
+
+const TRADING_PREFIXES = ["swap", "mint", "burn", "collect", "flash", "deposit", "withdraw", "stake", "unstake", "claim", "harvest", "transfer", "addliquidity", "removeliquidity", "multicall", "exactinput", "exactoutput"];
+// Security-critical admin functions: can pause, kill, upgrade the contract, or transfer control
+const ADMIN_PREFIXES = ["pause", "unpause", "kill", "upgrade", "grant", "revoke", "renounce", "transferownership", "setowner", "setadmin", "setgovernor"];
+// Pool/protocol configuration functions: change parameters but don't change who controls the contract
+const POOL_SETUP_PREFIXES = ["set", "update", "change", "initialize", "sync", "create", "add", "remove", "register", "deploy", "increase", "decrease", "enable", "disable", "notify"];
+
+function categorizeFunctions(abi: string): ContractFunctions {
+  try {
+    const parsed: { type: string; name?: string; stateMutability?: string }[] = JSON.parse(abi);
+    const fns = parsed.filter((item) => item.type === "function" && item.name);
+    const trading: string[] = [], poolSetup: string[] = [], admin: string[] = [], read: string[] = [];
+    for (const fn of fns) {
+      const name = fn.name!;
+      const lower = name.toLowerCase();
+      if (fn.stateMutability === "view" || fn.stateMutability === "pure") {
+        read.push(name);
+      } else if (TRADING_PREFIXES.some((t) => lower.startsWith(t))) {
+        trading.push(name);
+      } else if (ADMIN_PREFIXES.some((a) => lower.startsWith(a) || lower === a)) {
+        admin.push(name);
+      } else if (POOL_SETUP_PREFIXES.some((p) => lower.startsWith(p))) {
+        poolSetup.push(name);
+      } else {
+        poolSetup.push(name);
+      }
+    }
+    return { trading, poolSetup, admin, read };
+  } catch {
+    return { trading: [], poolSetup: [], admin: [], read: [] };
+  }
+}
+
+// ─── AI analysis ─────────────────────────────────────────────────────────────
+
+async function runAIAnalysis(context: {
+  txHash: string;
+  chain: string;
+  contracts: ContractRisk[];
+  assets: AssetRisk[];
+  sourceSnippets: Record<string, string>;
+}): Promise<{
+  narrative: string;
+  overallRisk: RiskLevel;
+  stackedRisks: string[];
+  sources: { title: string; url: string }[];
+  vulnerabilityChecks: {
+    category: "Protocol Security" | "Pool Security" | "Governance & Control" | "Position Economics";
+    title: string;
+    severity: RiskLevel;
+    finding: string;
+    info: string;
+    laymanTerms: string;
+    learnMoreUrl?: string;
+  }[];
+  scenariosThatCanGoWrong: {
+    title: string;
+    description: string;
+    impact: "high" | "medium" | "low";
+    icon: string;
+  }[];
+  howToProtectYourself: string[];
+}> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return {
+      narrative: "AI analysis skipped. ANTHROPIC_API_KEY not set in .env.local. Restart the dev server after adding it.",
+      overallRisk: "medium",
+      stackedRisks: [],
+      sources: [],
+      vulnerabilityChecks: [],
+      scenariosThatCanGoWrong: [],
+      howToProtectYourself: [],
+    };
+  }
+  const client = new Anthropic({ apiKey });
+
+  const explorerBase = context.chain === "base" ? "https://basescan.org" : "https://etherscan.io";
+
+  const prompt = `You are a DeFi security analyst. A user deposited into a yield farming position. You have web_search and web_fetch tools. USE THEM to research before writing the report.
+
+RESEARCH PROTOCOL (do this BEFORE writing the final report):
+1. For EVERY contract address in the data below, fetch its ${explorerBase}/address/<addr> page to confirm what it actually is (protocol name, contract role, verified status).
+2. For any contract you don't recognise after step 1, web_search for the address. look for the protocol name, audits, exploit history.
+3. For unknown tokens (symbol shown as "Unverified" or unfamiliar), search "<symbol> token <chain>" + check DefiLlama / CoinGecko to confirm legitimacy.
+4. For the overall protocol identified (e.g. Aerodrome, Uniswap v3, Curve), search for "<protocol> exploit", "<protocol> audit", recent news in the last 12 months.
+5. Cite the URLs you actually used in the "sources" array of your final JSON.
+
+CRITICAL RULES:
+- Do NOT call canonical tokens (USDC, WETH, DAI, USDT, cbETH, wstETH) "fake" or "shadow". they are real tokens. Verify via Basescan/Etherscan if uncertain.
+- If a contract is labelled as a known protocol contract in the data (router, position manager, factory, gauge), trust that label and confirm via Basescan.
+- Do NOT speculate. If web research turns up nothing about a contract, say "could not verify this contract via public sources" rather than guessing.
+- Focus on what your RESEARCH + the on-chain DATA actually shows.
+- NEVER contradict yourself. If you say a contract is verified in one check, do not flag it as unverified in another. If you say a protocol has no known exploits, do not mention an exploit elsewhere unless you found concrete evidence for it.
+- Every claim in vulnerabilityChecks must be consistent with the narrative and with every other check. Read your own output before finalising — if two checks contradict each other, merge or remove one.
+
+Transaction: ${context.txHash}
+Chain: ${context.chain}
+Block explorer for this chain: ${explorerBase}
+
+CONTRACTS TOUCHED (with on-chain findings already extracted):
+${JSON.stringify(context.contracts, null, 2)}
+
+ASSETS IN POSITION (already extracted):
+${JSON.stringify(context.assets, null, 2)}
+
+SOURCE CODE WAS FETCHED FOR: ${Object.keys(context.sourceSnippets).join(", ") || "no contracts"}
+${Object.entries(context.sourceSnippets).map(([addr, src]) => `\n--- ${addr} ---\n${src.slice(0, 1200)}`).join("\n")}
+
+After research, your final response must be ONLY a JSON object (no prose around it) in this exact schema. Do NOT copy or reuse the placeholder text below — every field must come from your actual research on this specific transaction.
+
+{
+  "vulnerabilityChecks": [
+    {
+      "category": "Protocol Security | Pool Security | Governance & Control | Position Economics",
+      "title": "Short descriptive title",
+      "severity": "critical | high | medium | low | info",
+      "finding": "One scannable line under 100 chars — what you found",
+      "info": "2-4 sentences: what you found AND why a yield farmer should care",
+      "laymanTerms": "1-2 sentences in zero-jargon plain English, analogy from everyday life where helpful",
+      "learnMoreUrl": "URL you actually fetched or a stable well-known reference"
+    }
+  ],
+  "narrative": "3-6 sentence plain-English risk summary based on your research",
+  "overallRisk": "critical | high | medium | low",
+  "stackedRisks": ["compounding risk 1", "compounding risk 2"],
+  "sources": [
+    { "title": "Actual page title you fetched", "url": "https://..." }
+  ],
+  "scenariosThatCanGoWrong": [
+    {
+      "title": "Short scenario name (under 6 words)",
+      "description": "1-2 sentences explaining what happens and why",
+      "impact": "high | medium | low",
+      "icon": "single emoji"
+    }
+  ],
+  "howToProtectYourself": [
+    "Imperative sentence starting with a verb, specific and actionable"
+  ]
+}
+
+CANONICAL CHECKLIST. address all that apply, organised by category:
+
+A) Protocol Security (the protocol-level contracts)
+   - Source Verification. verified on the block explorer?
+   - Audit Status. audited? by whom? when? any unaudited recent changes?
+   - Proxy / Upgrade Risk. are core contracts behind upgradeable proxies? who controls upgrades? any timelock?
+   - Bug Bounty. does the protocol run a bug bounty (Immunefi etc.)? what's the max payout?
+   - Exploit History. any past exploits on this protocol?
+   - Factory Maturity. when was the factory contract deployed?
+
+B) Pool Security (the specific pool you're depositing into)
+   - Pool Maturity & Liquidity. when was THIS pool deployed? current TVL, has it been stable?
+   - Pool-specific Pause / Kill Switch. can THIS pool be killed?
+   - Withdrawal / Exit. any locks, delays, queues on exiting this pool?
+
+C) Governance & Control (who controls the protocol, oracles, network)
+   - Admin Access & Governance. EOA / multisig / timelock / DAO? what can admin actually do?
+   - Gauge Vote Concentration. (for Velodrome/Aerodrome-style protocols) are emissions to this pool subject to weekly governance votes? what happens if votes shift?
+   - Oracle Dependency. does this position depend on an oracle? Chainlink? TWAP? native?
+   - Network Security. L1 / native L2 / scaling L2 / EVM-compat / non-EVM
+   - Team. known and reputable / anon reputable / unknown / bad rep
+   - Frontend / Phishing Risk. DNS hijack history, drainer incidents
+
+D) Position Economics (market and financial risk)
+   - Token Risks (one row per non-canonical token). freeze/blacklist/mint
+   - Impermanent Loss Exposure. none / minimal / moderate / high
+   - MEV Risk on Rebalance. (for concentrated liquidity positions) when rebalancing, are transactions sandwichable in the mempool?
+   - Yield Source. what is yield denominated in, is it sustainable?
+   - Bridge / Cross-chain Risk (only if cross-chain). sequencer, bridge security
+
+SCENARIOS THAT CAN GO WRONG:
+Give 3 to 5 specific, concrete things that could realistically go wrong with THIS position. Each scenario must be:
+- "title": short scenario name (under 6 words), no jargon
+- "description": 1-2 sentences in plain English explaining what happens and why
+- "impact": "high" / "medium" / "low". what it would cost the user if it happens
+- "icon": a single emoji that fits visually (📉 for price moves, 🎣 for phishing, 🧊 for liquidity dry-up, 🔒 for admin action, 🌉 for bridge issues, etc)
+Pull from the most likely failure modes for this specific protocol/pair, not generic DeFi risks. Make them feel personal to the user's actual position.
+
+HOW TO PROTECT YOURSELF:
+Give 3 to 5 specific, actionable things the user can do right now to mitigate the risks above. Each must be:
+- A short imperative sentence (start with a verb)
+- Concrete and doable (not "be careful" or "do your own research")
+- Tied to the actual scenarios above where possible
+Examples: "Bookmark aerodrome.finance and only access from the bookmark." "Set a price alert for when WETH exits your range." "Stake the LP NFT in the gauge to capture AERO emissions."
+
+CANONICAL ASSET TONE GUIDANCE:
+For canonical, well-established assets issued by reputable issuers (USDC by Circle, USDT by Tether, DAI by MakerDAO/Sky, GHO by Aave, WETH/wstETH/cbETH on their canonical chains): the theoretical freeze/blacklist/mint capability should be classified as "low" concern, NOT "medium" or "info". These powers exist on paper but enforcement against an average DeFi user is extraordinarily rare. Only escalate to "medium" or higher if there is concrete evidence of issuer-side adversarial action against ordinary users (not for theoretical risks, not for sanctioned-address freezes which only affect sanctioned addresses). Do NOT use "info" for token risks -- they are real risk dimensions even if small.
+
+MARKET & FINANCIAL SEVERITY GUIDANCE:
+- Token Risks: use "low" for canonical/reputable tokens, "medium" or "high" for unknown or poorly-audited tokens. Never "info".
+- Impermanent Loss Exposure: always "info". This is a DeFi fact of life, not an exploit vector.
+- MEV Risk: rate based on actual exposure. "low" if minimal, "medium" if meaningful sandwich risk exists.
+- Yield Source Sustainability: always "info". Context only.
+- Withdrawal / Exit: "low" if no locks. "medium" or "high" if there are queues, delays, or governance-controlled exits.
+
+Rules:
+- Skip categories that genuinely don't apply.
+- "severity": "critical" / "high" / "medium" / "low" / "info". Use "low" for things that are FINE (e.g. source verified). Use "info" only for context that isn't a risk dimension.
+- "finding" = one short scannable line (under 100 chars).
+- "info" = 2-4 sentences in plain English: what was found AND why a yield farmer should care.
+- "laymanTerms" = REQUIRED on every check. 1-2 sentences using zero jargon. Write as if explaining to a smart friend who has never used DeFi. Use an analogy from everyday life where it helps. Never use words like "protocol", "multisig", "proxy", "mempool", "oracle", "EOA", "timelock". translate them into plain concepts instead.
+- "learnMoreUrl" = a real authoritative URL you actually found via web_search/web_fetch, OR a stable well-known reference (Etherscan/Basescan address page, protocol docs root, audit report repo, Immunefi page, Binance/Coinbase academy article, rekt.news, DefiLlama). Do NOT invent URLs.
+- "sources" = array of { "title", "url" } objects. "title" must be the actual page title or a descriptive sentence (not the raw URL). Only include sources you actually fetched or searched. do not fabricate.`;
+
+  const tools = [
+    { type: "web_search_20250305", name: "web_search", max_uses: 8 },
+    { type: "web_fetch_20250910", name: "web_fetch", max_uses: 8 },
+  ];
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const messages: any[] = [{ role: "user", content: prompt }];
+
+  let finalText = "";
+  const MAX_ITER = 8;
+
+  try {
+    for (let i = 0; i < MAX_ITER; i++) {
+      const response = await client.beta.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8000,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        tools: tools as any,
+        messages,
+        betas: ["web-fetch-2025-09-10"],
+      });
+
+      // Pull any text out of this turn
+      for (const block of response.content) {
+        if (block.type === "text") finalText += block.text;
+      }
+
+      // Only `pause_turn` means "keep going. re-send the assistant turn so
+      // server tools can continue". Every other stop_reason (end_turn,
+      // stop_sequence, max_tokens, refusal, tool_use, etc.) is terminal —
+      // pushing assistant content and re-calling would be treated as a
+      // prefill, which Opus 4.7 rejects.
+      if (response.stop_reason === "pause_turn") {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        messages.push({ role: "assistant", content: response.content as any });
+        continue;
+      }
+      break;
+    }
+  } catch (err) {
+    console.error("AI research loop error:", err);
+    return {
+      narrative: `AI research failed: ${err instanceof Error ? err.message : "unknown error"}. The on-chain data above is still accurate.`,
+      overallRisk: "medium",
+      stackedRisks: [],
+      sources: [],
+      vulnerabilityChecks: [],
+      scenariosThatCanGoWrong: [],
+      howToProtectYourself: [],
+    };
+  }
+
+  // Strip markdown code fences if the AI wrapped the JSON in ```json ... ```
+  const stripped = finalText.replace(/```(?:json)?\s*([\s\S]*?)```/g, "$1").trim();
+  // Try multiple candidate strings: stripped version, original, and all {...} blobs
+  const candidates: string[] = [];
+  if (stripped) candidates.push(stripped);
+  if (finalText !== stripped) candidates.push(finalText);
+  // Also extract any {...} substrings (greedy, last-to-first)
+  const blobs = finalText.match(/\{[\s\S]*\}/g) ?? [];
+  candidates.push(...[...blobs].reverse());
+
+  console.log(`[ai-parse] finalText length=${finalText.length}, candidates=${candidates.length}`);
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed.narrative || Array.isArray(parsed.vulnerabilityChecks)) {
+        return {
+          narrative: parsed.narrative ?? "",
+            overallRisk: parsed.overallRisk ?? "medium",
+            stackedRisks: Array.isArray(parsed.stackedRisks) ? parsed.stackedRisks : [],
+            sources: Array.isArray(parsed.sources)
+              ? parsed.sources.map((s: unknown) =>
+                  typeof s === "string" ? { title: s, url: s } : s
+                )
+              : [],
+            vulnerabilityChecks: Array.isArray(parsed.vulnerabilityChecks)
+              ? parsed.vulnerabilityChecks.map((c: { category?: string; severity?: string; [k: string]: unknown }) => {
+                  const rawCategory = typeof c.category === "string" ? c.category : "";
+                  const titleLower = (c.title as string ?? "").toLowerCase();
+                  let severity = c.severity as string;
+                  // Normalize to canonical 4 categories, then apply overrides
+                  let finalCategory: YIFFCategory = normalizeCategory(rawCategory);
+                  // Withdrawal/exit → Pool Security regardless of what AI said
+                  if (titleLower.includes("withdrawal") || titleLower.includes("exit")) {
+                    finalCategory = "Pool Security";
+                  }
+                  if (finalCategory === "Position Economics") {
+                    // IL and yield sustainability are DeFi facts, not exploits -- always info
+                    const forceInfo = titleLower.includes("impermanent loss") || titleLower.includes("yield source") || titleLower.includes("yield sustain") || titleLower.includes("emission");
+                    // Token risks never downgraded to info
+                    const forceLow = titleLower.includes("token risk") && severity === "info";
+                    if (forceInfo) severity = "info";
+                    else if (forceLow) severity = "low";
+                  }
+                  return { ...c, category: finalCategory, severity };
+                })
+              : [],
+            scenariosThatCanGoWrong: Array.isArray(parsed.scenariosThatCanGoWrong) ? parsed.scenariosThatCanGoWrong : [],
+            howToProtectYourself: Array.isArray(parsed.howToProtectYourself) ? parsed.howToProtectYourself : [],
+          };
+        }
+    } catch {
+      // try next candidate
+    }
+  }
+
+  console.log(`[ai-parse] all candidates failed. finalText preview: ${finalText.slice(0, 300)}`);
+  return {
+    narrative: "AI returned no usable response.",
+    overallRisk: "medium",
+    stackedRisks: [],
+    sources: [],
+    vulnerabilityChecks: [],
+    scenariosThatCanGoWrong: [],
+    howToProtectYourself: [],
+  };
+}
+
+// ─── Unknown token investigator ──────────────────────────────────────────────
+
+const ERC20_BASIC_ABI = [
+  "function name() view returns (string)",
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+  "function totalSupply() view returns (uint256)",
+  "function owner() view returns (address)",
+];
+
+const RISKY_FUNCTIONS = [
+  { name: "mint", level: "high" as RiskLevel, detail: "Token has a mint function. supply can be inflated by whoever controls it" },
+  { name: "burn", level: "info" as RiskLevel, detail: "Token has a burn function. common, usually low risk" },
+  { name: "pause", level: "high" as RiskLevel, detail: "Token can be paused. transfers can be frozen" },
+  { name: "blacklist", level: "high" as RiskLevel, detail: "Token has a blacklist. specific addresses can be banned from holding/transferring" },
+  { name: "setBlacklist", level: "high" as RiskLevel, detail: "Token has a blacklist setter" },
+  { name: "_blacklist", level: "high" as RiskLevel, detail: "Token has a blacklist mechanism" },
+  { name: "setFee", level: "medium" as RiskLevel, detail: "Transfer fees can be changed by admin" },
+  { name: "setTax", level: "medium" as RiskLevel, detail: "Tax on transfers can be changed by admin" },
+  { name: "setMaxTx", level: "medium" as RiskLevel, detail: "Max transaction size can be changed. common in meme tokens" },
+  { name: "excludeFromFee", level: "medium" as RiskLevel, detail: "Admin can exclude addresses from fees. favouritism risk" },
+];
+
+async function investigateUnknownToken(
+  tokenAddr: string,
+  chain: Chain,
+  provider: ethers.JsonRpcProvider
+): Promise<AssetRisk> {
+  const findings: string[] = [];
+  let symbol = "?";
+  let name = tokenAddr;
+  let assetType: AssetType = "standard-erc20";
+
+  // 1. Read basic ERC-20 metadata on-chain
+  const contract = new ethers.Contract(tokenAddr, ERC20_BASIC_ABI, provider);
+  try {
+    const [n, s, d, supply] = await Promise.all([
+      contract.name().catch(() => null),
+      contract.symbol().catch(() => null),
+      contract.decimals().catch(() => null),
+      contract.totalSupply().catch(() => null),
+    ]);
+    if (n) name = n;
+    if (s) symbol = s;
+    if (d !== null && supply !== null) {
+      const totalHuman = Number(supply) / Math.pow(10, Number(d));
+      findings.push(`Total supply: ${totalHuman.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${s ?? ""}`);
+    }
+  } catch {
+    findings.push("Could not read basic ERC-20 metadata. non-standard token");
+  }
+
+  // 2. Check if owner is set (centralisation)
+  try {
+    const owner = await contract.owner();
+    if (owner && owner !== ethers.ZeroAddress) {
+      const code = await provider.getCode(owner).catch(() => "0x");
+      const isEOA = code === "0x";
+      if (isEOA) {
+        findings.push(`Owner is an EOA (${owner.slice(0, 10)}...). single wallet controls the contract`);
+      } else {
+        findings.push(`Owner is a contract (${owner.slice(0, 10)}...). could be multisig or another contract`);
+      }
+    } else {
+      findings.push("No owner / ownership renounced. admin functions disabled");
+    }
+  } catch {
+    // No owner(). fine, many tokens don't have one
+  }
+
+  // 3. Check for proxy
+  const proxyInfo = await detectProxy(tokenAddr, provider);
+  if (proxyInfo.isProxy) {
+    findings.push(`Upgradeable proxy. implementation can be swapped, changing token behaviour`);
+  }
+
+  // 4. Pull ABI and scan for risky functions
+  const abi = await getABI(tokenAddr, chain);
+  let sourceVerified = false;
+  let foundRiskyFunctions = false;
+  if (abi && abi !== "Contract source code not verified") {
+    sourceVerified = true;
+    try {
+      const parsed = JSON.parse(abi);
+      const fnNames = parsed
+        .filter((item: { type: string; name?: string }) => item.type === "function")
+        .map((item: { name?: string }) => item.name?.toLowerCase() ?? "");
+
+      for (const risky of RISKY_FUNCTIONS) {
+        if (fnNames.some((f: string) => f === risky.name.toLowerCase())) {
+          findings.push(risky.detail);
+          if (risky.level === "high" || risky.level === "critical") foundRiskyFunctions = true;
+        }
+      }
+    } catch {
+      // ABI parse error. skip
+    }
+  } else {
+    findings.push("⚠ Source code is NOT verified on Basescan. extreme caution, you cannot audit this token's logic");
+  }
+
+  // Trust level: unknown but verified + no risky fns → caution. Unverified or risky → danger.
+  const trustLevel: TrustLevel =
+    !sourceVerified || foundRiskyFunctions ? "danger" : "caution";
+
+  return {
+    address: tokenAddr,
+    symbol: symbol === "?" ? "Unverified" : symbol,
+    name,
+    assetType,
+    trustLevel,
+    riskNotes: findings.length > 0 ? findings : ["No risky functions detected from ABI"],
+  };
+}
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
+
+export async function POST(req: NextRequest) {
+  try {
+    const { txHash, chain } = (await req.json()) as { txHash: string; chain: Chain };
+
+    if (!txHash || !chain) {
+      return NextResponse.json({ error: "txHash and chain are required" }, { status: 400 });
+    }
+
+    const provider = new ethers.JsonRpcProvider(RPCS[chain]);
+
+    // 1. Fetch the transaction receipt
+    const [tx, receipt] = await Promise.all([
+      provider.getTransaction(txHash),
+      provider.getTransactionReceipt(txHash),
+    ]);
+
+    if (!tx || !receipt) {
+      return NextResponse.json({ error: "Transaction not found. Check the hash and chain." }, { status: 404 });
+    }
+
+    // 2. Collect all unique contract addresses touched
+    const touchedAddresses = new Set<string>();
+    if (tx.to) touchedAddresses.add(tx.to.toLowerCase());
+    for (const log of receipt.logs) {
+      touchedAddresses.add(log.address.toLowerCase());
+    }
+
+    // 3. Identify ERC-20 tokens from Transfer events
+    // ERC-20 Transfer: 3 topics (event sig + from + to), value in data
+    // ERC-721 Transfer: 4 topics (event sig + from + to + tokenId)
+    // We only want ERC-20 fungible tokens here; NFTs are tracked separately.
+    const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    const tokenAddresses = new Set<string>();
+    const nftAddresses = new Set<string>();
+    for (const log of receipt.logs) {
+      if (log.topics[0] === TRANSFER_TOPIC) {
+        if (log.topics.length === 3) {
+          tokenAddresses.add(log.address.toLowerCase());
+        } else if (log.topics.length === 4) {
+          nftAddresses.add(log.address.toLowerCase());
+        }
+      }
+    }
+
+    // 4. Analyze contracts (skip token addresses. those go in Asset Risks)
+    const contractRisks: ContractRisk[] = [];
+    const sourceSnippets: Record<string, string> = {};
+    let detectedPair: { token0Symbol: string; token1Symbol: string } | undefined;
+    let detectedFeePercent: number | undefined;
+    let detectedProtocol: string | undefined;
+
+    // Determine which addresses belong in contract analysis.
+    // Exclude plain ERC-20 tokens and NFT LP tokens — UNLESS the address is a
+    // registered protocol contract (e.g. the NFT Position Manager emits ERC-721
+    // transfers but IS a contract we care about analyzing).
+    const contractAddresses = Array.from(touchedAddresses).filter((addr) => {
+      const isKnownProtocol = !!findProtocolContract(addr, chain);
+      return isKnownProtocol || (!tokenAddresses.has(addr) && !nftAddresses.has(addr));
+    });
+
+    // ── Round 1: parallel Etherscan pre-fetch (ABI + source) for all contracts ──
+    // Running these in parallel avoids sequential rate-limit hits that silently
+    // return null for every call after the first when no API key is set.
+    const [abiResults, sourceResults] = await Promise.all([
+      Promise.all(contractAddresses.map((addr) => getABI(addr, chain))),
+      Promise.all(contractAddresses.map((addr) => getContractSource(addr, chain))),
+    ]);
+    const abiMap = new Map(contractAddresses.map((addr, i) => [addr, abiResults[i]]));
+    const sourceMap = new Map(contractAddresses.map((addr, i) => [addr, sourceResults[i]]));
+    for (const [addr, src] of sourceMap) {
+      if (src) sourceSnippets[addr] = src;
+    }
+
+    // ── Round 2: RPC-only analysis loop (no Etherscan calls here) ────────────
+    // Collect intermediate work items so we can batch the remaining Etherscan
+    // calls (meta + reserves + impl ABIs) in a single parallel round after the loop.
+    type WorkItem = {
+      address: string;
+      label: string;
+      poolType: PoolType;
+      findings: Finding[];
+      isProxy: boolean;
+      implementation?: string;
+      proxyAdmin?: string;
+      directAbi: string | null;
+      implAddrForAbi?: string; // fetch implementation ABI in round 3
+      fullPairInfo?: { token0: string; token1: string; token0Symbol: string; token1Symbol: string };
+      isVerified: boolean;
+    };
+    const workItems: WorkItem[] = [];
+
+    for (const address of contractAddresses) {
+      const abi = abiMap.get(address) ?? null;
+
+      const proxyInfo = await detectProxy(address, provider);
+      const factory = findPoolFactory(address, chain);
+      const protocolContract = findProtocolContract(address, chain);
+      let poolType: PoolType = factory?.poolType ?? "unknown";
+      let autoLabel: string | undefined;
+
+      const findings: Finding[] = [];
+
+      // Add findings from known protocol contracts (routers, position managers, voters)
+      if (protocolContract) {
+        for (const note of protocolContract.riskNotes) {
+          findings.push({ title: protocolContract.role, detail: note, level: "info" });
+        }
+        detectedProtocol = detectedProtocol ?? protocolContract.protocol;
+      }
+      if (factory) {
+        detectedProtocol = detectedProtocol ?? factory.name.replace(/ \(.+\)$/, "");
+      }
+
+      // For unknown contracts: run full auto-detection to identify pool type, pair, and fee.
+      // For known factory pools: do a lightweight token0/token1/fee read only (readContractState handles findings).
+      let fullPairInfo: WorkItem["fullPairInfo"];
+      if (!factory && !protocolContract) {
+        const auto = await autoDetectPoolType(address, provider, chain);
+        // Always capture pair/fee regardless of whether factory was recognized
+        findings.push(...auto.findings);
+        if (auto.pair) {
+          fullPairInfo = auto.pair;
+          detectedPair = detectedPair ?? {
+            token0Symbol: auto.pair.token0Symbol,
+            token1Symbol: auto.pair.token1Symbol,
+          };
+        }
+        // Capture fee regardless of whether factory was recognized
+        if (auto.feePercent !== undefined) detectedFeePercent = detectedFeePercent ?? auto.feePercent;
+        if (auto.poolType !== "unknown") {
+          poolType = auto.poolType;
+          autoLabel = auto.label;
+          if (auto.label) detectedProtocol = detectedProtocol ?? auto.label.replace(/ pool$/, "");
+        } else if (auto.pair) {
+          // Unknown factory but we resolved token pair — use a descriptive label
+          autoLabel = `Pool (${auto.pair.token0Symbol}/${auto.pair.token1Symbol})`;
+          detectedProtocol = detectedProtocol ?? "DEX Pool";
+        } else {
+          // RPC completely failed — fall back to protocol context if already detected
+          if (detectedProtocol) autoLabel = `${detectedProtocol} pool`;
+        }
+      } else if (factory && poolType !== "unknown") {
+        // Known factory pool: read pair tokens and fee directly without re-running full auto-detect.
+        // Always populate fullPairInfo (not gated on detectedPair) so each pool gets its own reserves.
+        try {
+          const pc = new ethers.Contract(address, POOL_AUTODETECT_ABI, provider);
+          const fee = await pc.fee().catch(() => null);
+          // Read token0/token1 sequentially with retry to avoid public RPC rate limits
+          const t0 = await pc.token0().catch(() => null) ?? await pc.token0().catch(() => null);
+          const t1 = await pc.token1().catch(() => null) ?? await pc.token1().catch(() => null);
+          if (t0 && t1) {
+            const [s0, s1] = await Promise.all([
+              resolveTokenSymbol(t0, chain, provider),
+              resolveTokenSymbol(t1, chain, provider),
+            ]);
+            fullPairInfo = { token0: t0, token1: t1, token0Symbol: s0, token1Symbol: s1 };
+            detectedPair = detectedPair ?? { token0Symbol: s0, token1Symbol: s1 };
+          }
+          if (fee !== null) detectedFeePercent = detectedFeePercent ?? Number(fee) / 10000;
+        } catch {
+          // non-critical: position overview will show without pair/fee
+        }
+      }
+
+      // Universal admin checks: owner / getOwner / admin / pendingOwner / paused (all RPC)
+      const adminFindings = await runUniversalAdminChecks(address, provider, chain);
+      findings.push(...adminFindings);
+
+      // Proxy / upgradeability check
+      if (proxyInfo.isProxy) {
+        findings.push({
+          title: "Upgradeable proxy",
+          detail: `Implementation: ${proxyInfo.implementation?.slice(0, 10)}...${proxyInfo.admin ? ` Admin: ${proxyInfo.admin.slice(0, 10)}...` : ""}`,
+          level: "high",
+        });
+
+        if (proxyInfo.admin) {
+          const code = await provider.getCode(proxyInfo.admin).catch(() => "0x");
+          if (code === "0x") {
+            findings.push({
+              title: "Proxy admin is an EOA",
+              detail: `${proxyInfo.admin.slice(0, 10)}.... a single wallet can upgrade this contract instantly.`,
+              level: "critical",
+            });
+          } else {
+            const adminTimelock = findTimelock(proxyInfo.admin, chain);
+            if (adminTimelock) {
+              findings.push({
+                title: `Proxy admin is a timelock (${adminTimelock.protocol})`,
+                detail: `Upgrades must be queued. delay ${adminTimelock.delaySeconds / 3600}h.`,
+                level: "low",
+              });
+            } else {
+              findings.push({
+                title: "Proxy admin is a contract",
+                detail: `${proxyInfo.admin.slice(0, 10)}.... could be multisig or another contract. Verify before relying on this.`,
+                level: "medium",
+              });
+            }
+          }
+        }
+      }
+
+      // Pool-specific checks (slot0, fee, isAlive, is_killed, A-ramp, etc.)
+      if (abi && poolType !== "unknown") {
+        const poolFindings = await readContractState(address, abi, provider, poolType);
+        findings.push(...poolFindings);
+      }
+
+      // Resolve which address to fetch the implementation ABI from (round 3).
+      // Priority 1: EIP-1967 proxy slot already resolved by detectProxy.
+      // Priority 2: explicit implementation() view function (covers non-EIP-1967 proxies and clones).
+      let implAddrForAbi: string | undefined;
+      if (!abi) {
+        if (proxyInfo.isProxy && proxyInfo.implementation) {
+          implAddrForAbi = proxyInfo.implementation;
+        } else {
+          try {
+            const implContract = new ethers.Contract(
+              address,
+              ["function implementation() view returns (address)"],
+              provider
+            );
+            const impl: string = await implContract.implementation();
+            if (impl && impl !== ethers.ZeroAddress) implAddrForAbi = impl;
+          } catch {
+            // Contract doesn't expose implementation(). skip.
+          }
+        }
+      }
+
+      const label =
+        factory?.name
+        ?? (protocolContract ? `${protocolContract.protocol} ${protocolContract.role}` : undefined)
+        ?? autoLabel
+        ?? `Unknown contract ${address.slice(0, 8)}...`;
+
+      workItems.push({
+        address,
+        label,
+        poolType,
+        findings,
+        isProxy: proxyInfo.isProxy,
+        implementation: proxyInfo.implementation,
+        proxyAdmin: proxyInfo.admin,
+        directAbi: abi,
+        implAddrForAbi,
+        fullPairInfo,
+        // Known protocol contracts and known factory pools are always considered verified
+        // (they're in our trusted registry). For everything else, use ABI presence.
+        isVerified: !!protocolContract || !!factory || abi !== null || poolType !== "unknown",
+      });
+    }
+
+    // ── Round 3: parallel Etherscan post-fetch (meta + reserves + impl ABIs) ──
+    // Brief pause to let the public RPC recover from the Round 2 call flood before
+    // we fire reserve balanceOf calls.
+    await new Promise((r) => setTimeout(r, 600));
+    const uniqueImplAddrs = [...new Set(workItems.map((w) => w.implAddrForAbi).filter(Boolean) as string[])];
+    const [metaResults, reserveResults, implAbiResults] = await Promise.all([
+      Promise.all(workItems.map((w) => getContractMeta(w.address, chain))),
+      Promise.all(workItems.map((w) =>
+        w.fullPairInfo ? getPoolReserves(w.address, w.fullPairInfo, chain, provider) : Promise.resolve(undefined)
+      )),
+      Promise.all(uniqueImplAddrs.map((addr) => getABI(addr, chain))),
+    ]);
+    const implAbiMap = new Map(uniqueImplAddrs.map((addr, i) => [addr, implAbiResults[i]]));
+
+    // ── Build contractRisks from work items + round-3 results ─────────────────
+    for (let i = 0; i < workItems.length; i++) {
+      const w = workItems[i];
+      const meta = metaResults[i];
+      const poolReserves = reserveResults[i];
+      const effectiveAbi = w.directAbi ?? (w.implAddrForAbi ? implAbiMap.get(w.implAddrForAbi) ?? null : null);
+
+      console.log(`[contract-meta] ${w.address.slice(0, 8)} deployedAt=${meta.deployedAt} creator=${meta.creatorAddress?.slice(0, 8)} reserves=${poolReserves ? "ok" : "none"} abi=${effectiveAbi ? "ok" : "none"}`);
+
+      contractRisks.push({
+        address: w.address,
+        label: w.label,
+        poolType: w.poolType !== "unknown" ? w.poolType : undefined,
+        findings: w.findings,
+        isProxy: w.isProxy,
+        implementation: w.implementation,
+        proxyAdmin: w.proxyAdmin,
+        functions: effectiveAbi ? categorizeFunctions(effectiveAbi) : undefined,
+        deployedAt: meta.deployedAt,
+        creatorAddress: meta.creatorAddress,
+        isVerified: w.isVerified,
+        poolReserves,
+      });
+    }
+
+    // Fallback: if pair wasn't resolved from RPC token0/token1, derive it from the
+    // ERC-20 Transfer events in the tx (tokenAddresses is always populated from logs)
+    if (!detectedPair && tokenAddresses.size >= 2) {
+      const addrs = Array.from(tokenAddresses).slice(0, 2);
+      const [s0, s1] = await Promise.all(
+        addrs.map((a) => resolveTokenSymbol(a, chain, provider))
+      );
+      detectedPair = { token0Symbol: s0, token1Symbol: s1 };
+      // Also populate fullPairInfo on the pool contract so reserves get fetched
+      const poolWork = workItems.find((w) => w.poolType !== "unknown");
+      if (poolWork && !poolWork.fullPairInfo) {
+        poolWork.fullPairInfo = { token0: addrs[0], token1: addrs[1], token0Symbol: s0, token1Symbol: s1 };
+      }
+    }
+
+    // Position type heuristic
+    const positionType = nftAddresses.size > 0
+      ? "Concentrated Liquidity NFT (active management)"
+      : tokenAddresses.size >= 2
+        ? "LP token position"
+        : "Single-asset position";
+
+    // riskScore computed after AI analysis so we can include AI checks (see below)
+
+    const explorerBase = chain === "base" ? "https://basescan.org" : "https://etherscan.io";
+
+    const positionOverview = {
+      protocol: detectedProtocol ?? "Unknown protocol",
+      pair: detectedPair ? `${detectedPair.token0Symbol} / ${detectedPair.token1Symbol}` : undefined,
+      feePercent: detectedFeePercent,
+      positionType,
+      chain,
+      explorerTxUrl: `${explorerBase}/tx/${txHash}`,
+    };
+
+    // 5. Classify assets
+    const assetRisks: AssetRisk[] = [];
+    for (const tokenAddr of tokenAddresses) {
+      const known = findKnownAsset(tokenAddr, chain);
+      if (known) {
+        // Anything in our static registry is a known/vetted asset. trustLevel "trusted".
+        // Individual riskNotes are caveats to be aware of, not red flags on the token itself.
+        assetRisks.push({
+          address: tokenAddr,
+          symbol: known.symbol,
+          name: known.name,
+          assetType: known.assetType,
+          trustLevel: "trusted",
+          riskNotes: known.riskNotes,
+        });
+      } else {
+        // Unknown token. investigate it on-chain
+        const investigated = await investigateUnknownToken(tokenAddr, chain, provider);
+        assetRisks.push(investigated);
+      }
+    }
+
+    // 6. AI analysis (with persistent learned-cache)
+    // Fingerprint by chain + contract addresses + token addresses so two
+    // different transactions touching the same pool/tokens both hit the cache.
+    // 30-day TTL is set in app/lib/learned-cache.ts.
+    const cacheKey = buildCacheKey({
+      chain,
+      contractAddresses: contractRisks.map((c) => c.address),
+      tokenAddresses: Array.from(tokenAddresses),
+    });
+    let ai: Awaited<ReturnType<typeof runAIAnalysis>>;
+    const cached = await getCached(cacheKey);
+    if (cached) {
+      console.log(`[learned-cache] HIT ${cacheKey} (saved ~$0.20 in AI cost)`);
+      ai = cached.result;
+    } else {
+      console.log(`[learned-cache] MISS ${cacheKey}. calling AI`);
+      ai = await runAIAnalysis({ txHash, chain, contracts: contractRisks, assets: assetRisks, sourceSnippets });
+      // Only cache successful AI runs (avoid persisting the fallback error narrative)
+      if (ai.vulnerabilityChecks && ai.vulnerabilityChecks.length > 0) {
+        await putCached(cacheKey, ai);
+      }
+    }
+
+    // 7. Simple summary line
+    const knownAssetSymbols = assetRisks.filter((a) => a.symbol !== "Unknown").map((a) => a.symbol);
+    const poolName = contractRisks.find((c) => c.poolType)?.label ?? "unknown protocol";
+    const summary = `Deposit into ${poolName} on ${chain.charAt(0).toUpperCase() + chain.slice(1)} involving ${knownAssetSymbols.join(", ") || "unknown assets"}.`;
+
+    // Position flow + docs (protocol-specific). Undefined for unknown protocols.
+    const flow = findProtocolFlow(detectedProtocol);
+
+    // ── Risk Score ──────────────────────────────────────────────────────────────
+    // Starts at 100. On-chain findings (direct, high-confidence) deduct the most.
+    // AI vulnerability checks deduct by category: protocol/pool checks matter most,
+    // governance (admin access) somewhat less, position economics (IL, yield) least.
+    // YIFF-aligned weights: Counterparty (Governance) 50%, Platform (Protocol) 30%,
+    // Pool 10%, Market & Financial (Economics) 10%.
+    // On-chain findings are high-confidence direct security signals — deduct the most.
+    const ON_CHAIN_DEDUCTIONS: Record<RiskLevel, number> = { critical: 20, high: 10, medium: 4, low: 1, info: 0 };
+    // AI checks deduct by category weight. Governance & Control carries the most weight
+    // (admin access, oracle, team) per YIFF methodology.
+    const AI_DEDUCTIONS: Record<string, Record<RiskLevel, number>> = {
+      "Protocol Security":    { critical: 18, high: 8,  medium: 3, low: 1, info: 0 }, // 30% weight
+      "Pool Security":        { critical: 8,  high: 4,  medium: 2, low: 1, info: 0 }, // 10% weight
+      "Governance & Control": { critical: 25, high: 12, medium: 5, low: 2, info: 0 }, // 50% weight — admin access, oracle
+      "Position Economics":   { critical: 6,  high: 2,  medium: 1, low: 0, info: 0 }, // 10% weight — IL/yield are DeFi facts
+    };
+    let riskScore = 100;
+    for (const f of contractRisks.flatMap((c) => c.findings)) {
+      riskScore -= ON_CHAIN_DEDUCTIONS[f.level] ?? 0;
+    }
+    // AI checks deducted after normalization (applied below after normalizedChecks)
+    // We'll patch riskScore again right after normalizedChecks is built.
+
+    // Always normalize vulnerability check categories before sending — covers both
+    // fresh AI responses and cached results that may have used old category names.
+    const normalizedChecks = (ai.vulnerabilityChecks ?? []).map((c: { category?: string; severity?: string; title?: string; [k: string]: unknown }) => {
+      const titleLower = ((c.title as string) ?? "").toLowerCase();
+      let finalCategory = normalizeCategory(typeof c.category === "string" ? c.category : "");
+      if (titleLower.includes("withdrawal") || titleLower.includes("exit")) finalCategory = "Pool Security";
+      let severity = (c.severity as string) ?? "info";
+      if (finalCategory === "Position Economics") {
+        if (titleLower.includes("impermanent loss") || titleLower.includes("yield source") || titleLower.includes("yield sustain") || titleLower.includes("emission")) severity = "info";
+        else if (titleLower.includes("token risk") && severity === "info") severity = "low";
+      }
+      return { ...c, category: finalCategory, severity };
+    });
+
+    // Apply AI check deductions now that categories are normalized
+    for (const check of normalizedChecks) {
+      const table = AI_DEDUCTIONS[check.category as string] ?? AI_DEDUCTIONS["Protocol Security"];
+      riskScore -= table[check.severity as RiskLevel] ?? 0;
+    }
+    riskScore = Math.max(0, Math.min(100, riskScore));
+
+    return NextResponse.json({
+      txHash,
+      chain,
+      summary,
+      overallRisk: ai.overallRisk,
+      riskScore,
+      positionOverview,
+      contracts: contractRisks,
+      assets: assetRisks,
+      stackedRisks: ai.stackedRisks,
+      aiNarrative: ai.narrative,
+      sources: ai.sources,
+      vulnerabilityChecks: normalizedChecks,
+      scenariosThatCanGoWrong: ai.scenariosThatCanGoWrong,
+      howToProtectYourself: ai.howToProtectYourself,
+      protocolFlow: flow ? { name: flow.flowName, steps: flow.steps, callout: flow.callout } : null,
+      protocolDocs: flow ? flow.docs : null,
+    });
+  } catch (err: unknown) {
+    console.error("Risk analysis error:", err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Internal server error" },
+      { status: 500 }
+    );
+  }
+}

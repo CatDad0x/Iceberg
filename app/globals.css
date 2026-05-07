@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+/* ── Theme variables ───────────────────────────────────────────────────────── */
+:root {
+  /* Dark (default) */
+  --bg:        #0D1B2A;
+  --surf:      #132236;
+  --surf2:     #1A2E47;
+  --border:    #1E3A5A;
+  --ice:       #5BC0DE;
+  --ice-dim:   rgba(91,192,222,0.12);
+  --text:      #E8EEF4;
+  --text-md:   #C8D8E8;
+  --muted:     #7A95B0;
+  --muted2:    #4A6480;
+  --background: var(--bg);
+  --foreground: var(--text);
+}
+
+[data-theme="light"] {
+  --bg:        #F4F7FA;
+  --surf:      #ffffff;
+  --surf2:     #F1F5F9;
+  --border:    #E2E8F0;
+  --ice:       #2563EB;
+  --ice-dim:   rgba(37,99,235,0.08);
+  --text:      #0F172A;
+  --text-md:   #1E293B;
+  --muted:     #64748B;
+  --muted2:    #94A3B8;
+  --background: var(--bg);
+  --foreground: var(--text);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, Helvetica, sans-serif;
+  transition: background 0.2s, color 0.2s;
+}
+
+/* ── Dark mode overrides for Tailwind utility classes ─────────────────────── */
+/* Applied when html has no data-theme (default dark) or data-theme="dark" */
+:root:not([data-theme="light"]) {
+  /* Page backgrounds */
+  .bg-\[\#F4F7FA\]           { background-color: var(--bg) !important; }
+  .bg-white                  { background-color: var(--surf) !important; }
+  .bg-white\/70              { background-color: color-mix(in srgb, var(--surf) 90%, transparent) !important; }
+  .bg-slate-50               { background-color: var(--surf2) !important; }
+  .bg-slate-100              { background-color: var(--surf2) !important; }
+  .bg-transparent            { background-color: transparent !important; }
+
+  /* Borders & dividers */
+  .border-slate-200          { border-color: var(--border) !important; }
+  .border-slate-300          { border-color: var(--border) !important; }
+  .divide-slate-200 > * + * { border-color: var(--border) !important; }
+
+  /* Text */
+  .text-slate-900            { color: var(--text) !important; }
+  .text-slate-800            { color: var(--text) !important; }
+  .text-slate-700            { color: var(--text-md) !important; }
+  .text-slate-600            { color: var(--muted) !important; }
+  .text-slate-500            { color: var(--muted) !important; }
+  .text-slate-400            { color: var(--muted2) !important; }
+  .text-slate-300            { color: var(--muted2) !important; }
+
+  /* Risk tool custom color classes */
+  .text-\[\#1B1B2F\]         { color: var(--text) !important; }
+  .text-\[\#5B6B7E\]         { color: var(--muted) !important; }
+
+  /* Placeholder */
+  .placeholder-slate-400::placeholder { color: var(--muted2) !important; }
+  .placeholder-slate-500::placeholder { color: var(--muted) !important; }
+
+  /* Select / input */
+  select { color-scheme: dark; }
+
+  /* Shadows */
+  .shadow-md  { box-shadow: 0 4px 20px rgba(0,0,0,0.4) !important; }
+  .shadow-lg  { box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important; }
+  .shadow-sm  { box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important; }
+}
+
+/* ── Print / PDF export ─────────────────────────────────────────────────────── */
+@media print {
+  .no-print { display: none !important; }
+  body { background: #fff !important; color: #000 !important; }
+  * { box-shadow: none !important; }
+  .sticky { position: static !important; }
+  .lg\:grid-cols-3 { grid-template-columns: 1fr !important; }
+  .lg\:col-span-2  { grid-column: auto !important; }
+  details { display: block !important; }
+  details > *:not(summary) { display: block !important; visibility: visible !important; }
+  summary { list-style: none !important; cursor: default !important; }
+  summary::-webkit-details-marker { display: none !important; }
+  .rounded-2xl { break-inside: avoid; }
+  @page { margin: 1.2cm 1.8cm; size: A4; }
+  .print-header { display: flex !important; }
+}
