@@ -1,36 +1,124 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Iceberg - DeFi Risk Analysis
 
-## Getting Started
+> **The risk beneath your yield.**
 
-First, run the development server:
+Iceberg is an automated due diligence tool for DeFi positions. Paste a transaction hash, get a structured breakdown of smart contract risk, protocol controls, and yield exposure in plain English - in seconds.
+
+![Iceberg Landing Page](./public/screenshots/landing.png)
+
+---
+
+## What It Does
+
+Most people in DeFi chase APY without knowing what they're actually putting their money into. Iceberg tears apart every contract involved in a transaction and tells you exactly what could go wrong - in language anyone can understand.
+
+Think of it as a Bloomberg terminal for yield risk, except it works on-chain and does an hour of manual research for you in 30 seconds.
+
+![Risk Report](./public/screenshots/report.png)
+
+---
+
+## How It Works
+
+### 1. Decodes the transaction
+When you paste a tx hash, our backend calls the blockchain node directly, pulls the full receipt, and parses every log event to extract which contracts were touched and which tokens moved between addresses.
+
+### 2. Pulls verified source code
+We hit the Etherscan API to pull verified source code and ABI for each contract - so we can see exactly what functions exist and whether the code is publicly readable or hidden.
+
+### 3. Reads live on-chain state
+Live RPC calls are made directly against the node to check things like who the current owner is, whether the contract is paused right now, and whether there's a pending admin transfer queued up that could change who controls the money.
+
+### 4. AI research pass
+Claude does a web research pass on top - searching for audit reports on GitHub, exploit write-ups on Rekt News, recent governance changes - and synthesises everything into a plain English narrative with every source cited.
+
+---
+
+## Four Risk Categories
+
+![Vulnerability Assessment](./public/screenshots/vulnerability.png)
+
+| Category | What We Check |
+|---|---|
+| **Protocol Security** | Source verified, audited, upgradeable contracts, exploit history |
+| **Pool Security** | Pool age, kill switch risk, withdrawal locks |
+| **Governance & Control** | Who controls admin keys - single wallet, multisig, or DAO with timelock |
+| **Position Economics** | Impermanent loss exposure, MEV sandwich risk, token freeze/mint risks |
+
+Each factor is individually scored and weighted into an **Iceberg Score out of 100** with plain English cards explaining what it means for your money.
+
+---
+
+## Contract Analysis
+
+![Contract Analysis](./public/screenshots/contracts.png)
+
+For every contract touched in the transaction we show:
+- Whether the source code is verified on-chain
+- Who controls the admin keys
+- Whether it's an upgradeable proxy
+- All functions categorised by type (trading, pool setup, admin, read-only)
+- Deployment age and creator address
+
+---
+
+## Smart Caching
+
+AI analysis costs real money per call. So we fingerprint each analysis by chain + the exact set of contracts and tokens involved, creating a unique ID for every pool.
+
+- Two different people analysing the same pool hit the same cache key - the second person gets the full result instantly at zero cost
+- Cache lives for 30 days
+- The more people use it, the more pools get covered and the cheaper it gets for everyone
+
+This is the economics that makes it viable as a public good at scale.
+
+---
+
+## Why This Matters
+
+- **Educational** - you learn what an upgradeable proxy is, what a multisig means, what impermanent loss does to your position - all in the context of money you already deployed
+- **Shareable** - anyone can post a pool address or tx hash in a Discord or Telegram and get back a full breakdown instantly
+- **Public good** - building a shared knowledge layer of DeFi risk intelligence, one cached analysis at a time
+
+---
+
+## Tech Stack
+
+- **Frontend** - Next.js 16, TypeScript, Tailwind CSS
+- **Blockchain** - ethers.js v6, Etherscan V2 API, public RPC endpoints
+- **AI** - Claude (Anthropic) with web search for real-time research
+- **Chains** - Ethereum, Base (more coming)
+
+---
+
+## Running Locally
+
+```bash
+git clone https://github.com/CatDad0x/iceberg
+cd iceberg
+npm install
+```
+
+Create a `.env.local` file:
+
+```
+ETHEREUM_RPC_URL=https://eth.llamarpc.com
+BASE_RPC_URL=https://mainnet.base.org
+ETHERSCAN_API_KEY=your_key_here
+BASESCAN_API_KEY=your_key_here
+ANTHROPIC_API_KEY=your_key_here
+```
+
+Then:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Get free API keys at [etherscan.io](https://etherscan.io/apis), [basescan.org](https://basescan.org/apis), and [console.anthropic.com](https://console.anthropic.com).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+---
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Built by [@CatDad0x](https://github.com/CatDad0x)
