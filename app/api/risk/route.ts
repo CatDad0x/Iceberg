@@ -1395,8 +1395,32 @@ export async function POST(req: NextRequest) {
       return { ...c, category: finalCategory, severity };
     });
 
+    // Inject hardcoded canonical checks that AI consistently skips or gets wrong.
+    // These are factual, not opinion-based, so they should never be AI-generated.
+    const hardcodedChecks: typeof normalizedChecks = [];
+
+    // Withdrawal / Exit — standard AMM pools (Uniswap v3, Aerodrome, Curve, etc.) have
+    // no withdrawal locks, queues, or delays. Always low concern for known pool types.
+    const hasWithdrawalCheck = normalizedChecks.some(
+      (c) => typeof c.title === "string" && (c.title.toLowerCase().includes("withdrawal") || c.title.toLowerCase().includes("exit"))
+    );
+    const hasKnownPool = contractRisks.some((c) => c.poolType);
+    if (!hasWithdrawalCheck && hasKnownPool) {
+      hardcodedChecks.push({
+        category: "Pool Security",
+        title: "Withdrawal / Exit",
+        severity: "low",
+        finding: "No locks, queues, or delays on exiting the position",
+        info: "Standard AMM pools let you remove liquidity at any time with no waiting period or exit penalty. Your funds are not locked.",
+        laymanTerms: "You can take your money out whenever you want. There is no waiting period, no queue, and no fee to exit beyond normal network gas costs.",
+        learnMoreUrl: undefined,
+      });
+    }
+
+    const allChecks = [...hardcodedChecks, ...normalizedChecks];
+
     // Apply AI check deductions now that categories are normalized
-    for (const check of normalizedChecks) {
+    for (const check of allChecks) {
       const table = AI_DEDUCTIONS[check.category as string] ?? AI_DEDUCTIONS["Protocol Security"];
       riskScore -= table[check.severity as RiskLevel] ?? 0;
     }
@@ -1414,7 +1438,7 @@ export async function POST(req: NextRequest) {
       stackedRisks: ai.stackedRisks,
       aiNarrative: ai.narrative,
       sources: ai.sources,
-      vulnerabilityChecks: normalizedChecks,
+      vulnerabilityChecks: allChecks,
       scenariosThatCanGoWrong: ai.scenariosThatCanGoWrong,
       howToProtectYourself: ai.howToProtectYourself,
       protocolFlow: flow ? { name: flow.flowName, steps: flow.steps, callout: flow.callout } : null,
