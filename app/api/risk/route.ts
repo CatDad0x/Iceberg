@@ -1433,7 +1433,9 @@ async function analyzeContractAddress(address: string, chain: Chain, provider: e
     functions: effectiveAbi ? categorizeFunctions(effectiveAbi) : undefined,
     deployedAt: meta.deployedAt,
     creatorAddress: meta.creatorAddress,
-    isVerified: !!protocolContract || !!factory || abi !== null || poolType !== "unknown",
+    // autoLabel being set means we extracted useful identity from the contract (pair tokens,
+    // known-protocol fallback, etc.) — treat as verified even if factory() RPC failed.
+    isVerified: !!protocolContract || !!factory || abi !== null || poolType !== "unknown" || autoLabel !== undefined,
     poolReserves,
   });
 
@@ -1955,8 +1957,10 @@ export async function POST(req: NextRequest) {
         implAddrForAbi,
         fullPairInfo,
         // Known protocol contracts and known factory pools are always considered verified
-        // (they're in our trusted registry). For everything else, use ABI presence.
-        isVerified: !!protocolContract || !!factory || abi !== null || poolType !== "unknown",
+        // (they're in our trusted registry). For everything else, use ABI or autoLabel presence.
+        // autoLabel being set means we extracted useful identity (pair tokens, known-protocol
+        // fallback, etc.) — verified even if factory() RPC failed due to rate-limiting.
+        isVerified: !!protocolContract || !!factory || abi !== null || poolType !== "unknown" || autoLabel !== undefined,
       });
     }
 
