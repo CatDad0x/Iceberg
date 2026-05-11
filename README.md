@@ -52,6 +52,8 @@ Every analysis is cached by contract set. The more users run analyses, the more 
 
 ![Risk Report](./public/screenshots/report.png)
 
+A recent analysis flagged a pool offering 28% APY where the admin key was a single unverified wallet with no timelock, the contracts had never been audited, and the protocol had been exploited once before for $4.2M. The Iceberg Score came back at 34/100. That information took 30 seconds to surface. Without it, a user sees only the yield.
+
 Every analysis covers four risk categories, each individually scored and weighted into an **Iceberg Score out of 100**:
 
 | Category | Weight | What We Check |
