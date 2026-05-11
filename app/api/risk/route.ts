@@ -1523,6 +1523,20 @@ async function analyzeContractAddress(address: string, chain: Chain, provider: e
   if (!hasWithdrawalCheck && hasKnownPool) {
     hardcodedChecks.push({ category: "Pool Security", title: "Withdrawal / Exit", severity: "low", finding: "No locks, queues, or delays on exiting the position", info: "Standard AMM pools let you remove liquidity at any time with no waiting period or exit penalty.", laymanTerms: "You can take your money out whenever you want. No waiting period, no queue, no exit fee.", learnMoreUrl: undefined });
   }
+  const isV4Local = contractRisks.some((c) => c.poolType === "uniswap-v4") ||
+    (detectedProtocol?.toLowerCase().includes("uniswap v4") ?? false);
+  if (isV4Local) {
+    if (!normalizedChecks.some((c) => typeof c.title === "string" && c.title.toLowerCase().includes("hook"))) {
+      hardcodedChecks.push({ category: "Pool Security", title: "V4 Hook risk", severity: "medium", finding: "Uniswap V4 pools can attach custom hook contracts that execute on every swap and liquidity change", info: "Hooks are arbitrary smart contracts that run before and after every pool action. A malicious or buggy hook could drain funds, block withdrawals, or manipulate prices.", laymanTerms: "Think of hooks like a plugin that runs automatically every time anyone touches the pool. If the plugin is broken or malicious, it can affect your money.", learnMoreUrl: "https://docs.uniswap.org/contracts/v4/concepts/hooks" });
+    }
+    if (!normalizedChecks.some((c) => typeof c.title === "string" && c.title.toLowerCase().includes("singleton"))) {
+      hardcodedChecks.push({ category: "Protocol Security", title: "Singleton PoolManager", severity: "medium", finding: "All V4 liquidity lives in one contract — a bug or exploit affects every pool simultaneously", info: "Unlike V3 where each pool is a separate contract, V4 stores all liquidity in a single PoolManager. A vulnerability could expose every V4 pool at once.", laymanTerms: "In V3, every pool had its own vault. In V4, all pools share one giant vault. If someone finds a way to break into it, all pools are at risk at once.", learnMoreUrl: "https://docs.uniswap.org/contracts/v4/concepts/poolmanager" });
+    }
+    if (!normalizedChecks.some((c) => typeof c.title === "string" && c.title.toLowerCase().includes("governance"))) {
+      hardcodedChecks.push({ category: "Governance & Control", title: "Uniswap DAO governance", severity: "low", finding: "Protocol parameters controlled by Uniswap DAO via timelock — no single wallet admin", info: "Uniswap V4 is governed by UNI token holders through on-chain governance with a timelock delay.", laymanTerms: "No single person or company controls Uniswap. Changes require a public vote and a waiting period.", learnMoreUrl: "https://gov.uniswap.org" });
+    }
+  }
+
   const allChecks = [...hardcodedChecks, ...normalizedChecks];
   for (const check of allChecks) {
     const table = AI_DEDUCTIONS_LOCAL[check.category as string] ?? AI_DEDUCTIONS_LOCAL["Protocol Security"];
@@ -2176,6 +2190,50 @@ export async function POST(req: NextRequest) {
         laymanTerms: "You can take your money out whenever you want. There is no waiting period, no queue, and no fee to exit beyond normal network gas costs.",
         learnMoreUrl: undefined,
       });
+    }
+
+    // Uniswap V4 specific checks — Claude consistently skips these because V4 is
+    // "well audited" and it treats the protocol as safe. But V4 has unique structural
+    // risks that are always relevant regardless of the specific pool.
+    const isV4 = contractRisks.some((c) => c.poolType === "uniswap-v4") ||
+      (detectedProtocol?.toLowerCase().includes("uniswap v4") ?? false);
+    if (isV4) {
+      const hasHooksCheck = normalizedChecks.some((c) => typeof c.title === "string" && c.title.toLowerCase().includes("hook"));
+      if (!hasHooksCheck) {
+        hardcodedChecks.push({
+          category: "Pool Security",
+          title: "V4 Hook risk",
+          severity: "medium",
+          finding: "Uniswap V4 pools can attach custom hook contracts that execute on every swap and liquidity change",
+          info: "Hooks are arbitrary smart contracts that run before and after every pool action. A malicious or buggy hook could drain funds, block withdrawals, or manipulate prices. Always verify what hook (if any) is attached to the pool before depositing.",
+          laymanTerms: "Think of hooks like a plugin that runs automatically every time anyone touches the pool. If the plugin is broken or malicious, it can affect your money. Always check whether there is a hook and who controls it.",
+          learnMoreUrl: "https://docs.uniswap.org/contracts/v4/concepts/hooks",
+        });
+      }
+      const hasSingletonCheck = normalizedChecks.some((c) => typeof c.title === "string" && c.title.toLowerCase().includes("singleton"));
+      if (!hasSingletonCheck) {
+        hardcodedChecks.push({
+          category: "Protocol Security",
+          title: "Singleton PoolManager",
+          severity: "medium",
+          finding: "All V4 liquidity lives in one contract — a bug or exploit affects every pool simultaneously",
+          info: "Unlike V3 where each pool is a separate contract, V4 stores all liquidity in a single PoolManager. This improves gas efficiency but concentrates risk: a vulnerability in the PoolManager could expose every V4 pool at once. The contract has been audited extensively but the risk is structurally different from V3.",
+          laymanTerms: "In V3, every pool had its own vault. In V4, all pools share one giant vault. If someone finds a way to break into that vault, all pools are at risk at once rather than just one.",
+          learnMoreUrl: "https://docs.uniswap.org/contracts/v4/concepts/poolmanager",
+        });
+      }
+      const hasGovernanceCheck = normalizedChecks.some((c) => typeof c.title === "string" && c.title.toLowerCase().includes("governance"));
+      if (!hasGovernanceCheck) {
+        hardcodedChecks.push({
+          category: "Governance & Control",
+          title: "Uniswap DAO governance",
+          severity: "low",
+          finding: "Protocol parameters controlled by Uniswap DAO via timelock — no single wallet admin",
+          info: "Uniswap V4 is governed by UNI token holders through on-chain governance with a timelock delay. No single wallet or team can change the protocol unilaterally. This is considered best practice for DeFi governance.",
+          laymanTerms: "No single person or company controls Uniswap. Changes to the protocol require a public vote by UNI token holders and a waiting period before anything happens. This is one of the safer governance setups in DeFi.",
+          learnMoreUrl: "https://gov.uniswap.org",
+        });
+      }
     }
 
     const allChecks = [...hardcodedChecks, ...normalizedChecks];
