@@ -998,35 +998,34 @@ After research, your final response must be ONLY a JSON object (no prose around 
   ]
 }
 
-CANONICAL CHECKLIST. address all that apply, organised by category:
+MANDATORY CHECKLIST. Every item below MUST produce at least one entry in vulnerabilityChecks — even if the result is clean. A clean finding is severity "low". Context-only is severity "info". Do NOT skip any item. The user sees what was checked: a green "low concern" row is just as important to them as a red "critical" row. An empty or short vulnerabilityChecks array is a FAILURE of this task.
 
-A) Protocol Security (the protocol-level contracts)
-   - Source Verification. verified on the block explorer?
-   - Audit Status. audited? by whom? when? any unaudited recent changes? Search GitHub ("<protocol> audit"), Immunefi, and the protocol's own docs. Populate the top-level "audits" array with every audit report you find — include the direct URL if you fetched or found one.
-   - Proxy / Upgrade Risk. are core contracts behind upgradeable proxies? who controls upgrades? any timelock?
-   - Bug Bounty. does the protocol run a bug bounty (Immunefi etc.)? what's the max payout?
-   - Exploit History. any past exploits on this protocol? Search rekt.news and the DeFiLlama hacks page. Populate the top-level "exploits" array with every confirmed exploit you find — include date, USD amount lost, and a link if you found one.
-   - Factory Maturity. when was the factory contract deployed?
+A) Protocol Security — produce ONE check per bullet:
+   1. Source Verification — are the core contracts verified on the block explorer? (low = verified, high = unverified)
+   2. Audit Status — audited? by whom? when? Search GitHub ("<protocol> audit"), Immunefi, and the protocol's own docs. Populate the top-level "audits" array. (low = audited with no critical findings, high = unaudited or critical open issues)
+   3. Proxy / Upgrade Risk — are core contracts behind upgradeable proxies? who controls upgrades? (low = immutable or DAO-timelocked, high = EOA-upgradeable)
+   4. Bug Bounty — does the protocol run a bug bounty on Immunefi? max payout? (low = active bounty, medium = none)
+   5. Exploit History — any past exploits? Search rekt.news and DeFiLlama hacks. Populate "exploits" array. (low = clean record, high/critical = prior exploits)
+   6. Factory / Contract Maturity — when was the factory deployed? (low = 1+ year, medium = under 6 months)
 
-B) Pool Security (the specific pool you're depositing into)
-   - Pool Maturity & Liquidity. when was THIS pool deployed? current TVL, has it been stable?
-   - Pool-specific Pause / Kill Switch. can THIS pool be killed?
-   - Withdrawal / Exit. any locks, delays, queues on exiting this pool?
+B) Pool Security — produce ONE check per bullet:
+   7. Pool Maturity & Liquidity — when was THIS pool deployed? current TVL? (low = mature and deep, medium = new or shallow)
+   8. Kill Switch / Pause — can this pool be paused or killed by an admin? (low = not killable, medium = killable with timelock, high = killable by single wallet)
+   9. Withdrawal / Exit — any locks, delays, queues, or penalties on exiting? (low = no locks, high = locked)
 
-C) Governance & Control (who controls the protocol, oracles, network)
-   - Admin Access & Governance. EOA / multisig / timelock / DAO? what can admin actually do?
-   - Gauge Vote Concentration. (for Velodrome/Aerodrome-style protocols) are emissions to this pool subject to weekly governance votes? what happens if votes shift?
-   - Oracle Dependency. does this position depend on an oracle? Chainlink? TWAP? native?
-   - Network Security. L1 / native L2 / scaling L2 / EVM-compat / non-EVM
-   - Team. known and reputable / anon reputable / unknown / bad rep
-   - Frontend / Phishing Risk. DNS hijack history, drainer incidents. Max severity: "medium" — frontend attacks are a real risk but affect user behaviour, not the protocol contracts directly.
+C) Governance & Control — produce ONE check per bullet:
+   10. Admin Access — EOA, multisig, timelock, or DAO? What can they actually change? (low = DAO/timelock, medium = multisig, high = EOA)
+   11. Oracle Dependency — does this pool rely on a price oracle? (low = no oracle or uses TWAP, medium = single Chainlink feed, high = manipulable oracle)
+   12. Network / Chain Security — L1, native L2 (OP/ARB), or scaling L2? Any sequencer centralisation? (info for L1, low for native L2, medium for newer L2s)
+   13. Team — known and reputable / anon / unknown / bad rep (low = known team, medium = anon, high = red flags)
+   14. Frontend / Phishing Risk — DNS hijack history, drainer incidents. Max severity "medium". (low = no incidents, medium = prior incident)
 
-D) Position Economics (market and financial risk)
-   - Token Risks (one row per non-canonical token). freeze/blacklist/mint
-   - Impermanent Loss Exposure. none / minimal / moderate / high
-   - MEV Risk on Rebalance. (for concentrated liquidity positions) when rebalancing, are transactions sandwichable in the mempool?
-   - Yield Source. what is yield denominated in, is it sustainable?
-   - Bridge / Cross-chain Risk (only if cross-chain). sequencer, bridge security
+D) Position Economics — produce ONE check per bullet:
+   15. Token Risk — one row per token in the position. freeze/blacklist/mint risk. (low = canonical token, medium = unknown or new token)
+   16. Impermanent Loss Exposure — always severity "info". How much could the pair diverge?
+   17. MEV / Sandwich Risk — (for concentrated liquidity) are rebalance txs sandwichable? (low = minimal, medium = meaningful risk)
+   18. Yield Source — always severity "info". What is yield denominated in, is it sustainable?
+   19. Bridge / Cross-chain Risk — ONLY if bridged assets are in the position. (low = native bridge, medium = third-party bridge)
 
 SCENARIOS THAT CAN GO WRONG:
 Give 3 to 5 specific, concrete things that could realistically go wrong with THIS position. Each scenario must be:
@@ -1054,13 +1053,13 @@ MARKET & FINANCIAL SEVERITY GUIDANCE:
 - Withdrawal / Exit: "low" if no locks. "medium" or "high" if there are queues, delays, or governance-controlled exits.
 
 Rules:
-- Skip categories that genuinely don't apply.
-- "severity": "critical" / "high" / "medium" / "low" / "info". Use "low" for things that are FINE (e.g. source verified). Use "info" only for context that isn't a risk dimension.
-- "finding" = one short scannable line (under 100 chars).
-- "info" = 2-4 sentences in plain English: what was found AND why a yield farmer should care.
-- "laymanTerms" = REQUIRED on every check. 1-2 sentences using zero jargon. Write as if explaining to a smart friend who has never used DeFi. Use an analogy from everyday life where it helps. Never use words like "protocol", "multisig", "proxy", "mempool", "oracle", "EOA", "timelock". translate them into plain concepts instead.
-- "learnMoreUrl" = a real authoritative URL you actually found via web_search/web_fetch, OR a stable well-known reference (Etherscan/Basescan address page, protocol docs root, audit report repo, Immunefi page, Binance/Coinbase academy article, rekt.news, DefiLlama). Do NOT invent URLs.
-- "sources" = array of { "title", "url" } objects. "title" must be the actual page title or a descriptive sentence (not the raw URL). Only include sources you actually fetched or searched. do not fabricate.`;
+- EVERY numbered checklist item above must appear in vulnerabilityChecks. Do not skip any. If item 19 (Bridge risk) does not apply because there are no bridged assets, still include it as severity "info" with finding "No bridged assets in this position". Minimum 14 checks expected.
+- "severity": "critical" / "high" / "medium" / "low" / "info". Use "low" for things that checked out fine (e.g. source verified, no exploits, DAO governance). Use "info" ONLY for the two items marked "always severity info" above (Impermanent Loss and Yield Source).
+- "finding" = one short scannable line (under 100 chars). For clean findings, start with the positive result: "Source code verified on Basescan", "No known exploits found", "Uniswap DAO governs via timelock".
+- "info" field = 2-4 sentences in plain English: what you found AND why a yield farmer should care.
+- "laymanTerms" = REQUIRED on every check. 1-2 sentences using zero jargon. Write as if explaining to a smart friend who has never used DeFi. Use an analogy from everyday life where it helps. Never use words like "protocol", "multisig", "proxy", "mempool", "oracle", "EOA", "timelock" — translate them into plain concepts instead.
+- "learnMoreUrl" = a real authoritative URL you actually found via web_search/web_fetch, OR a stable well-known reference (Etherscan/Basescan address page, protocol docs root, audit report repo, Immunefi page, rekt.news, DefiLlama). Do NOT invent URLs.
+- "sources" = array of { "title", "url" } objects. "title" must be the actual page title or a descriptive sentence (not the raw URL). Only include sources you actually fetched or searched. Do not fabricate.`;
 
   const tools = [
     { type: "web_search_20250305", name: "web_search", max_uses: 4 },
@@ -1517,12 +1516,60 @@ async function analyzeContractAddress(address: string, chain: Chain, provider: e
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const hardcodedChecks: any[] = [];
+
+  // ── Source Verification ─────────────────────────────────────────────────────
+  const hasSourceCheck = normalizedChecks.some((c) => typeof c.title === "string" && (c.title.toLowerCase().includes("source") || c.title.toLowerCase().includes("verified") || c.title.toLowerCase().includes("unverified")));
+  if (!hasSourceCheck) {
+    const unverifiedContracts = contractRisks.filter((c) => c.isVerified === false);
+    if (unverifiedContracts.length > 0) {
+      hardcodedChecks.push({ category: "Protocol Security", title: "Unverified contract source code", severity: "high", finding: `${unverifiedContracts.length} contract(s) have no verified source code on the block explorer`, info: `Contracts without public source code cannot be independently audited. Anyone depositing cannot verify what the contract actually does. Unverified contracts are a major red flag.`, laymanTerms: "When a smart contract has no public source code, you are trusting the developer completely — you cannot see what the code actually does. This is like sending money to a black box.", learnMoreUrl: `https://${chain === "base" ? "basescan" : "etherscan"}.io` });
+    } else if (contractRisks.some((c) => c.isVerified)) {
+      hardcodedChecks.push({ category: "Protocol Security", title: `Source code verified on ${chain === "base" ? "Basescan" : "Etherscan"}`, severity: "low", finding: "All contracts touched in this transaction have verified open-source code", info: "Verified source code means anyone can read exactly what the contract does. Security researchers, auditors, and users can all check the code independently.", laymanTerms: "The code running these contracts is fully public — anyone can check it. This is the minimum standard for a trustworthy DeFi product.", learnMoreUrl: `https://${chain === "base" ? "basescan" : "etherscan"}.io` });
+    }
+  }
+
+  // ── Chain / Network Security ────────────────────────────────────────────────
+  const hasChainCheck = normalizedChecks.some((c) => typeof c.title === "string" && (c.title.toLowerCase().includes("sequencer") || c.title.toLowerCase().includes("network") || c.title.toLowerCase().includes("l2") || c.title.toLowerCase().includes("chain")));
+  if (!hasChainCheck) {
+    if (chain === "base") {
+      hardcodedChecks.push({ category: "Governance & Control", title: "Base L2 sequencer dependency", severity: "low", finding: "Base is a Coinbase-operated single-sequencer Optimistic Rollup", info: "Base uses a single sequencer run by Coinbase to order transactions. If the sequencer goes offline, transactions pause but funds are safe — you can always exit via L1. The 7-day fraud proof window means Ethereum is the final security backstop.", laymanTerms: "Base is a faster, cheaper version of Ethereum run by Coinbase. If Coinbase's system goes down, your transactions pause but your money stays safe — you can always move it back to Ethereum directly.", learnMoreUrl: "https://docs.base.org/docs/base-contracts" });
+    } else {
+      hardcodedChecks.push({ category: "Governance & Control", title: "Ethereum L1 — highest security", severity: "low", finding: "Transaction is on Ethereum mainnet — maximum decentralisation and security", info: "Ethereum is the most battle-tested smart contract platform. No sequencer risk, no bridge risk for native assets.", laymanTerms: "Ethereum is the original blockchain and the most secure. Using it directly means you are not depending on any company to keep things running.", learnMoreUrl: "https://ethereum.org/en/developers/docs/networks/" });
+    }
+  }
+
+  // ── Token Risks per asset ───────────────────────────────────────────────────
+  for (const asset of assetRisks) {
+    const symbol = asset.symbol.toLowerCase();
+    const aiAlreadyCovered = normalizedChecks.some((c) => {
+      const t = (c.title as string ?? "").toLowerCase();
+      return (t.includes("token") || t.includes("risk")) && t.includes(symbol);
+    });
+    if (aiAlreadyCovered) continue;
+    const alreadyHardcoded = hardcodedChecks.some((c) => { const t = (c.title as string ?? "").toLowerCase(); return t.includes(symbol); });
+    if (alreadyHardcoded) continue;
+    const severity = asset.trustLevel === "trusted" ? "low" : asset.trustLevel === "caution" ? "medium" : "high";
+    const topNote = asset.riskNotes[0] ?? "No additional risk notes";
+    hardcodedChecks.push({ category: "Position Economics", title: `${asset.symbol} — token risk`, severity, finding: severity === "low" ? `${asset.symbol} (${asset.name}) — canonical, well-established token` : `${asset.symbol} (${asset.name}) — ${asset.assetType} with elevated risk`, info: asset.riskNotes.slice(0, 2).join(" "), laymanTerms: severity === "low" ? `${asset.symbol} is a well-known, widely-used token. It carries the standard risks of any digital asset but is not considered high risk on its own.` : `${asset.symbol} carries extra risk: ${topNote}`, learnMoreUrl: `https://${chain === "base" ? "basescan" : "etherscan"}.io/token/${asset.address}` });
+  }
+
+  // ── Impermanent Loss — always inject "info" for 2-token LP positions ────────
+  const hasILCheck = normalizedChecks.some((c) => typeof c.title === "string" && (c.title.toLowerCase().includes("impermanent") || c.title.toLowerCase().includes("il ")));
+  if (!hasILCheck && assetRisks.length >= 2) {
+    const symbols = assetRisks.map((a) => a.symbol).join(" / ");
+    hardcodedChecks.push({ category: "Position Economics", title: "Impermanent loss exposure", severity: "info", finding: `${symbols} pair — IL risk present on concentrated liquidity position`, info: "Concentrated liquidity positions amplify returns when price is in range but amplify impermanent loss when price moves out of range. If one token moves sharply, you end up holding more of the falling token and less of the rising one.", laymanTerms: `If ${assetRisks[0]?.symbol ?? "token A"} and ${assetRisks[1]?.symbol ?? "token B"} move in opposite directions, the pool rebalances and you end up with less total value than if you had held them separately. This is the main trade-off of being a liquidity provider.`, learnMoreUrl: "https://academy.binance.com/en/articles/impermanent-loss-explained" });
+  }
+
+  // ── Withdrawal / Exit ───────────────────────────────────────────────────────
   const hasWithdrawalCheck = normalizedChecks.some((c) => typeof c.title === "string" && (c.title.toLowerCase().includes("withdrawal") || c.title.toLowerCase().includes("exit")));
   const hasKnownPool = contractRisks.some((c) => c.poolType) || !!detectedProtocol;
   if (!hasWithdrawalCheck && hasKnownPool) {
-    hardcodedChecks.push({ category: "Pool Security", title: "Withdrawal / Exit", severity: "low", finding: "No locks, queues, or delays on exiting the position", info: "Standard AMM pools let you remove liquidity at any time with no waiting period or exit penalty.", laymanTerms: "You can take your money out whenever you want. No waiting period, no queue, no exit fee.", learnMoreUrl: undefined });
+    hardcodedChecks.push({ category: "Pool Security", title: "Withdrawal / Exit", severity: "low", finding: "No locks, queues, or delays on exiting the position", info: "Standard AMM pools let you remove liquidity at any time with no waiting period or exit penalty. Your funds are not locked.", laymanTerms: "You can take your money out whenever you want. There is no waiting period, no queue, and no fee to exit beyond normal network gas costs.", learnMoreUrl: undefined });
   }
+
+  // ── Uniswap V4 structural risks ─────────────────────────────────────────────
   const isV4Local = contractRisks.some((c) => c.poolType === "uniswap-v4") ||
     (detectedProtocol?.toLowerCase().includes("uniswap v4") ?? false);
   if (isV4Local) {
@@ -2170,12 +2217,116 @@ export async function POST(req: NextRequest) {
     });
 
     // Inject hardcoded canonical checks that AI consistently skips or gets wrong.
-    // These are factual, not opinion-based, so they should never be AI-generated.
+    // These are derived entirely from on-chain data we already have — no AI needed.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const hardcodedChecks: any[] = [];
 
-    // Withdrawal / Exit — standard AMM pools (Uniswap v3, Aerodrome, Curve, etc.) have
-    // no withdrawal locks, queues, or delays. Always low concern for known pool types.
+    // ── Source Verification ───────────────────────────────────────────────────
+    // We already know isVerified for every contract. Inject a check so it always shows.
+    const hasSourceCheck = normalizedChecks.some((c) => typeof c.title === "string" && (c.title.toLowerCase().includes("source") || c.title.toLowerCase().includes("verified") || c.title.toLowerCase().includes("unverified")));
+    if (!hasSourceCheck) {
+      const unverifiedContracts = contractRisks.filter((c) => c.isVerified === false);
+      if (unverifiedContracts.length > 0) {
+        hardcodedChecks.push({
+          category: "Protocol Security",
+          title: "Unverified contract source code",
+          severity: "high",
+          finding: `${unverifiedContracts.length} contract(s) have no verified source code on the block explorer`,
+          info: `Contracts without public source code cannot be independently audited. Anyone depositing into this position cannot verify what the contract actually does. Unverified contracts are a major red flag. Affected addresses: ${unverifiedContracts.map((c) => c.address).join(", ")}`,
+          laymanTerms: "When a smart contract has no public source code, you are trusting the developer completely — you cannot see what the code actually does. This is like sending money to a black box.",
+          learnMoreUrl: `https://${chain === "base" ? "basescan" : "etherscan"}.io`,
+        });
+      } else if (contractRisks.some((c) => c.isVerified)) {
+        hardcodedChecks.push({
+          category: "Protocol Security",
+          title: `Source code verified on ${chain === "base" ? "Basescan" : "Etherscan"}`,
+          severity: "low",
+          finding: "All contracts touched in this transaction have verified open-source code",
+          info: "Verified source code means anyone can read exactly what the contract does. Security researchers, auditors, and users can all check the code independently. This is a basic requirement for trustworthy DeFi.",
+          laymanTerms: "The code running these contracts is fully public — anyone can check it. This is the minimum standard for a trustworthy DeFi product.",
+          learnMoreUrl: `https://${chain === "base" ? "basescan" : "etherscan"}.io`,
+        });
+      }
+    }
+
+    // ── Chain / Network Security ──────────────────────────────────────────────
+    // Inject chain-level risk so it always shows up. Derived from chain param.
+    const hasChainCheck = normalizedChecks.some((c) => typeof c.title === "string" && (c.title.toLowerCase().includes("sequencer") || c.title.toLowerCase().includes("network") || c.title.toLowerCase().includes("l2") || c.title.toLowerCase().includes("chain")));
+    if (!hasChainCheck) {
+      if (chain === "base") {
+        hardcodedChecks.push({
+          category: "Governance & Control",
+          title: "Base L2 sequencer dependency",
+          severity: "low",
+          finding: "Base is a Coinbase-operated single-sequencer Optimistic Rollup",
+          info: "Base uses a single sequencer run by Coinbase to order transactions. If the sequencer goes offline, transactions are delayed but funds are never at risk — you can always exit via L1. The 7-day fraud proof window means Ethereum itself is the final security backstop.",
+          laymanTerms: "Base is a faster, cheaper version of Ethereum run by Coinbase. If Coinbase's system goes down, your transactions pause but your money stays safe — you can always move it back to Ethereum directly.",
+          learnMoreUrl: "https://docs.base.org/docs/base-contracts",
+        });
+      } else {
+        hardcodedChecks.push({
+          category: "Governance & Control",
+          title: "Ethereum L1 — highest security",
+          severity: "low",
+          finding: "Transaction is on Ethereum mainnet — maximum decentralisation and security",
+          info: "Ethereum is the most battle-tested and decentralised smart contract platform. No sequencer risk, no bridge risk for native assets. The trade-off is higher gas costs.",
+          laymanTerms: "Ethereum is the original blockchain and the most secure. Using it directly means you are not depending on any company to keep things running.",
+          learnMoreUrl: "https://ethereum.org/en/developers/docs/networks/",
+        });
+      }
+    }
+
+    // ── Token Risks per asset ─────────────────────────────────────────────────
+    // Derived from assetRisks (already built from KNOWN_ASSETS). One row per asset
+    // where AI hasn't already produced a token risk check for that symbol.
+    for (const asset of assetRisks) {
+      const symbol = asset.symbol.toLowerCase();
+      const aiAlreadyCovered = normalizedChecks.some((c) => {
+        const t = (c.title as string ?? "").toLowerCase();
+        return (t.includes("token") || t.includes("risk")) && t.includes(symbol);
+      });
+      if (aiAlreadyCovered) continue;
+      const alreadyHardcoded = hardcodedChecks.some((c) => {
+        const t = (c.title as string ?? "").toLowerCase();
+        return t.includes(symbol);
+      });
+      if (alreadyHardcoded) continue;
+      const severity = asset.trustLevel === "trusted" ? "low" : asset.trustLevel === "caution" ? "medium" : "high";
+      const topNote = asset.riskNotes[0] ?? "No additional risk notes";
+      hardcodedChecks.push({
+        category: "Position Economics",
+        title: `${asset.symbol} — token risk`,
+        severity,
+        finding: severity === "low"
+          ? `${asset.symbol} (${asset.name}) — canonical, well-established token`
+          : `${asset.symbol} (${asset.name}) — ${asset.assetType} with elevated risk`,
+        info: asset.riskNotes.slice(0, 2).join(" "),
+        laymanTerms: severity === "low"
+          ? `${asset.symbol} is a well-known, widely-used token. It carries the standard risks of any digital asset but is not considered high risk on its own.`
+          : `${asset.symbol} carries extra risk because: ${topNote}`,
+        learnMoreUrl: `https://${chain === "base" ? "basescan" : "etherscan"}.io/token/${asset.address}`,
+      });
+    }
+
+    // ── Impermanent Loss — always inject "info" for 2-token LP positions ──────
+    const hasILCheck = normalizedChecks.some((c) => typeof c.title === "string" && (c.title.toLowerCase().includes("impermanent") || c.title.toLowerCase().includes("il ")));
+    if (!hasILCheck && assetRisks.length >= 2) {
+      const symbols = assetRisks.map((a) => a.symbol).join(" / ");
+      const isTightRange = !!(detectedPair);
+      hardcodedChecks.push({
+        category: "Position Economics",
+        title: "Impermanent loss exposure",
+        severity: "info",
+        finding: `${symbols} pair — IL risk present${isTightRange ? " on concentrated liquidity position" : ""}`,
+        info: isTightRange
+          ? "Concentrated liquidity positions amplify returns when price is in range but amplify impermanent loss when price moves out of range. If one token moves sharply, you end up holding more of the falling token and less of the rising one."
+          : "Providing liquidity means you hold both tokens as a pair. If one token's price moves significantly relative to the other, you end up with less total value than if you had held the tokens separately. This is called impermanent loss.",
+        laymanTerms: `If ${assetRisks[0]?.symbol ?? "token A"} and ${assetRisks[1]?.symbol ?? "token B"} move in opposite directions, the pool automatically rebalances and you end up with less total value than if you had just held them. It's the main trade-off of being a liquidity provider.`,
+        learnMoreUrl: "https://academy.binance.com/en/articles/impermanent-loss-explained",
+      });
+    }
+
+    // ── Withdrawal / Exit ─────────────────────────────────────────────────────
     const hasWithdrawalCheck = normalizedChecks.some(
       (c) => typeof c.title === "string" && (c.title.toLowerCase().includes("withdrawal") || c.title.toLowerCase().includes("exit"))
     );
@@ -2192,9 +2343,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Uniswap V4 specific checks — Claude consistently skips these because V4 is
-    // "well audited" and it treats the protocol as safe. But V4 has unique structural
-    // risks that are always relevant regardless of the specific pool.
+    // ── Uniswap V4 structural risks ───────────────────────────────────────────
     const isV4 = contractRisks.some((c) => c.poolType === "uniswap-v4") ||
       (detectedProtocol?.toLowerCase().includes("uniswap v4") ?? false);
     if (isV4) {
