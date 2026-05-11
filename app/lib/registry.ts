@@ -355,6 +355,21 @@ export const KNOWN_ASSETS: KnownAsset[] = [
     ],
   },
 
+  // ── VVV (Venice Token — AI inference platform on Base) ──
+  {
+    symbol: "VVV",
+    name: "Venice Token",
+    assetType: "standard-erc20",
+    chain: "base",
+    address: "0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf",
+    decimals: 18,
+    riskNotes: [
+      "Governance and utility token for Venice AI, a decentralised AI inference platform",
+      "Relatively new token — limited price history and liquidity depth vs blue-chip assets",
+      "Token value tied to Venice platform adoption and AI inference demand",
+    ],
+  },
+
   // ── cbBTC (Coinbase Wrapped Bitcoin on Base) ──
   {
     symbol: "cbBTC",

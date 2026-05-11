@@ -1528,6 +1528,12 @@ async function analyzeContractAddress(address: string, chain: Chain, provider: e
     const table = AI_DEDUCTIONS_LOCAL[check.category as string] ?? AI_DEDUCTIONS_LOCAL["Protocol Security"];
     riskScore -= table[check.severity as RiskLevel] ?? 0;
   }
+  // Penalty for thin analysis — if the AI produced fewer than 3 checks, we don't
+  // have enough signal to justify a high score. Cap at 75 in that case.
+  if (normalizedChecks.length < 3) riskScore = Math.min(riskScore, 75);
+  // Penalty for unknown pool — we couldn't identify the pool type so analysis is incomplete.
+  if (!contractRisks.some((c) => c.poolType)) riskScore = Math.min(riskScore, 80);
+
   riskScore = Math.max(0, Math.min(100, riskScore));
 
   return NextResponse.json({
@@ -2179,6 +2185,12 @@ export async function POST(req: NextRequest) {
       const table = AI_DEDUCTIONS[check.category as string] ?? AI_DEDUCTIONS["Protocol Security"];
       riskScore -= table[check.severity as RiskLevel] ?? 0;
     }
+    // Penalty for thin analysis — if AI produced fewer than 3 checks, cap the score
+    // so we never show 95+ when we barely analysed anything.
+    if (normalizedChecks.length < 3) riskScore = Math.min(riskScore, 75);
+    // Penalty for unknown pool — couldn't identify pool type, analysis is incomplete.
+    if (!contractRisks.some((c) => c.poolType)) riskScore = Math.min(riskScore, 80);
+
     riskScore = Math.max(0, Math.min(100, riskScore));
 
     return NextResponse.json({
