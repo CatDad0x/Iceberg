@@ -18,7 +18,6 @@ const SUPPORTED_PROTOCOLS: Protocol[] = [
   { name: "Uniswap",    chain: "base",     iconUrl: "https://assets.coingecko.com/coins/images/12504/small/uniswap-uni.png" },
   { name: "Curve",      chain: "base",     iconUrl: "https://icons.llama.fi/curve.png" },
   { name: "Equalizer",  chain: "base",     iconUrl: "https://icons.llama.fi/equalizer.png" },
-  { name: "Velodrome",  chain: "ethereum", iconUrl: "https://icons.llama.fi/velodrome.png" },
   { name: "Balancer",   chain: "ethereum", iconUrl: "https://icons.llama.fi/balancer.png" },
   { name: "SushiSwap",  chain: "ethereum", iconUrl: "https://icons.llama.fi/sushiswap.png" },
   { name: "PancakeSwap", chain: "ethereum", iconUrl: "https://assets.coingecko.com/coins/images/12632/small/pancakeswap-cake-logo_%281%29.png" },

@@ -130,7 +130,7 @@ This is how it operates as a genuinely sustainable public good rather than a pai
 Iceberg analyses any pool or gauge on supported chains. It has first-class support for:
 
 **Base:** Aerodrome, Uniswap V3, Curve, Equalizer
-**Ethereum:** Velodrome, Balancer, SushiSwap, PancakeSwap, Uniswap V3, Curve
+**Ethereum:** Balancer, SushiSwap, PancakeSwap, Uniswap V3, Curve
 
 Any address or tx hash can be pasted. Unsupported protocols still receive a full generic contract and governance analysis.
 
