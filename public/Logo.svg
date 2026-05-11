@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 420" width="400" height="420">
+  <defs>
+
+    <!-- Iceberg fill: white with very faint blue tint -->
+    <linearGradient id="iceFill" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0%"   stop-color="#ffffff"/>
+      <stop offset="60%"  stop-color="#f2f9ff"/>
+      <stop offset="100%" stop-color="#dff0fb"/>
+    </linearGradient>
+
+    <!-- Below-water fill: pale blue, very transparent -->
+    <linearGradient id="subFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#a8d8f0" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#c8eafb" stop-opacity="0.15"/>
+    </linearGradient>
+
+  </defs>
+
+  <!-- ── Below-water dashed triangle ─────────────────────────── -->
+  <polygon
+    points="42,278 358,278 200,400"
+    fill="url(#subFill)"
+    stroke="#4a9fd4"
+    stroke-width="2"
+    stroke-dasharray="9,6"
+    stroke-linejoin="round"
+  />
+
+  <!-- ── Waterline ─────────────────────────────────────────────── -->
+  <line x1="18" y1="278" x2="382" y2="278"
+    stroke="#4a9fd4" stroke-width="1.8"/>
+
+  <!-- Wave marks left -->
+  <path d="M 28,272 Q 35,267 42,272 Q 49,277 56,272"
+    stroke="#4a9fd4" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  <!-- Wave marks right -->
+  <path d="M 340,272 Q 347,267 354,272 Q 361,277 368,272"
+    stroke="#4a9fd4" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+
+  <!-- ── Above-water iceberg — filled shape ────────────────────── -->
+  <!--
+    Outline traced from reference image.
+    Waterline = y 278.
+    Three peaks: main (tallest, slightly left of centre),
+    left shoulder, right peak.
+  -->
+  <path d="
+    M  84,278
+    L  98,256
+    L 112,224
+    L 128,200
+    L 120,214
+    L 142,180
+    L 132,194
+    L 158,132
+    L 180, 64
+    L 205,118
+    L 245, 92
+    L 268,148
+    L 290,196
+    L 308,238
+    L 322,278
+    Z
+  "
+    fill="url(#iceFill)"
+    stroke="#1c3668"
+    stroke-width="2.4"
+    stroke-linejoin="round"
+    stroke-linecap="round"
+  />
+
+  <!-- ── Internal crystal-facet lines ─────────────────────────── -->
+
+  <!-- Main peak → left face, runs to lower-left base -->
+  <line x1="180" y1="64"  x2="118" y2="278"
+    stroke="#1c3668" stroke-width="1.4" stroke-opacity="0.65" stroke-linecap="round"/>
+
+  <!-- Main peak → centre-right, runs to centre base -->
+  <line x1="180" y1="64"  x2="198" y2="278"
+    stroke="#1c3668" stroke-width="1.2" stroke-opacity="0.55" stroke-linecap="round"/>
+
+  <!-- Right peak → runs to right-centre base -->
+  <line x1="245" y1="92"  x2="252" y2="278"
+    stroke="#1c3668" stroke-width="1.2" stroke-opacity="0.55" stroke-linecap="round"/>
+
+  <!-- Left shoulder → runs to left base -->
+  <line x1="142" y1="180" x2="102" y2="278"
+    stroke="#1c3668" stroke-width="1.1" stroke-opacity="0.5"  stroke-linecap="round"/>
+
+  <!-- Valley between main & right peak → short facet line -->
+  <line x1="205" y1="118" x2="228" y2="278"
+    stroke="#1c3668" stroke-width="1.0" stroke-opacity="0.4"  stroke-linecap="round"/>
+
+</svg>

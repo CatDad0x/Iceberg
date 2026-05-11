@@ -167,7 +167,7 @@ export default function LandingPage() {
       {/* ── Header ── */}
       <header className="flex items-center justify-between px-8 py-3 border-b border-slate-200 bg-white/70 backdrop-blur-sm">
         <div className="flex items-center gap-3">
-          <Image src="/Logo.png" alt="Iceberg" width={30} height={30} className="rounded-lg" />
+          <Image src="/Logo.svg" alt="Iceberg" width={30} height={30} className="rounded-lg" />
           <span className="text-[16px] font-semibold text-slate-900">Iceberg</span>
           <span className="text-slate-300 select-none">|</span>
           <span className="text-sm text-slate-500">The risk beneath your yield.</span>
@@ -190,7 +190,7 @@ export default function LandingPage() {
       <main className="flex flex-1 flex-col items-center justify-center px-6 py-10 text-center">
 
         <Image
-          src="/Logo.png"
+          src="/Logo.svg"
           alt="Iceberg"
           width={220}
           height={220}

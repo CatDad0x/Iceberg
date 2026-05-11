@@ -122,7 +122,7 @@ function Header() {
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 0 16px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <Image src="/Logo.png" alt="Iceberg" width={36} height={36} style={{ borderRadius: 10, mixBlendMode: "lighten" }} />
+        <Image src="/Logo.svg" alt="Iceberg" width={36} height={36} style={{ borderRadius: 10, mixBlendMode: "lighten" }} />
         <div>
           <div style={{ fontSize: 18, fontWeight: 700, color: TEXT, letterSpacing: "-0.02em" }}>Iceberg</div>
           <div style={{ fontSize: 11, color: MUTED, marginTop: 1 }}>The risk beneath your yield</div>

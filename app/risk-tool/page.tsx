@@ -128,7 +128,7 @@ type AnalysisResult = {
 async function downloadReport(result: AnalysisResult) {
   const { pdf } = await import("@react-pdf/renderer");
   const { RiskReportPDF } = await import("../components/RiskReportPDF");
-  const logoUrl = `${window.location.origin}/Logo.png`;
+  const logoUrl = `${window.location.origin}/Logo.svg`;
 
   const blob = await pdf(<RiskReportPDF result={result} logoUrl={logoUrl} />).toBlob();
   const url = URL.createObjectURL(blob);
@@ -418,7 +418,7 @@ function Header() {
   return (
     <div className="flex items-center justify-between pb-4">
       <Link href="/" className="flex items-center gap-3">
-        <Image src="/Logo.png" alt="Iceberg" width={36} height={36} className="rounded-lg" />
+        <Image src="/Logo.svg" alt="Iceberg" width={36} height={36} className="rounded-lg" />
         <div>
           <div className={`text-xl font-bold leading-none ${INK}`}>Iceberg</div>
           <div className={`mt-0.5 text-xs ${MUTED} hidden sm:block`}>The risk beneath your yield</div>
@@ -612,7 +612,7 @@ function EmptyState({ onTry }: { onTry: (hash: string) => void }) {
   return (
     <div className={`mt-4 ${SURFACE} rounded-2xl p-12 text-center shadow-sm`}>
       <div className="mx-auto mb-4">
-        <Image src="/Logo.png" alt="" width={80} height={80} className="mx-auto mix-blend-multiply" />
+        <Image src="/Logo.svg" alt="" width={80} height={80} className="mx-auto mix-blend-multiply" />
       </div>
       <p className={`text-sm font-medium ${INK}`}>Paste a transaction hash to get a risk breakdown.</p>
       <p className={`mt-3 text-xs ${MUTED}`}>
