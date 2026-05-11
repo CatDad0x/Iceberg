@@ -6,6 +6,8 @@ Iceberg is a free, open-source due diligence tool for DeFi users. Paste a transa
 
 Built by [@CatDad0x](https://x.com/CatDad0x)
 
+*The landing page — paste any transaction hash or pool address to get started.*
+
 ![Iceberg Landing Page](./public/screenshots/landing.png)
 
 ---
@@ -46,6 +48,8 @@ Every analysis is cached by contract set. The more users run analyses, the more 
 
 ## What It Analyses
 
+*The risk report — an Iceberg Score out of 100 with a plain-English verdict, followed by a full breakdown of every risk category.*
+
 ![Risk Report](./public/screenshots/report.png)
 
 Every analysis covers four risk categories, each individually scored and weighted into an **Iceberg Score out of 100**:
@@ -82,6 +86,8 @@ Claude runs a web research pass, finding audit reports on GitHub, exploit write-
 
 ## Contract Analysis
 
+*Every contract touched in the transaction is decoded and displayed — source verification, admin ownership, proxy detection, and live TVL.*
+
 ![Contract Analysis](./public/screenshots/contracts.png)
 
 For every contract touched in the transaction:
@@ -95,6 +101,8 @@ For every contract touched in the transaction:
 ---
 
 ## Exploit History Timeline
+
+*Individual risk checks with severity ratings, plus a timeline of historical exploits pulled from DeFiLlama's hacks database.*
 
 ![Vulnerability Assessment](./public/screenshots/vulnerability.png)
 
