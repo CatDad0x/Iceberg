@@ -112,8 +112,50 @@ export const PROTOCOL_CONTRACTS: ProtocolContract[] = [
   { name: "Equalizer Voter (Base)", protocol: "Equalizer", role: "voter", chain: "base", address: "0x46abb88ae1f2a35ea559925d99fdc5441b592687", riskNotes: ["Controls SCALE emissions to gauges", "Governance: veSCALE holders vote weekly", "Can kill gauges, redirecting emissions"] },
   { name: "Equalizer Gauge Factory (Base)", protocol: "Equalizer", role: "gauge-factory", chain: "base", address: "0xb136b45e3e241bb0d0c037395446cf42e4db13d6", riskNotes: ["Deploys new gauges for Equalizer pools"] },
   // Uniswap v4
-  { name: "Uniswap v4 PositionManager (Base)", protocol: "Uniswap v4", role: "position-manager", chain: "base", address: "0x7c5f5a4bbd8fd63184577525326123b519429bdc", riskNotes: ["Manages v4 LP positions as NFTs", "Singleton: all v4 pool state lives in the PoolManager", "Hooks can add custom logic per pool — check hook address for each pool"] },
-  { name: "Uniswap v4 Universal Router (Base)", protocol: "Uniswap v4", role: "router", chain: "base", address: "0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7", riskNotes: ["Stateless universal router for v2/v3/v4 swaps", "Immutable, no admin"] },
+  {
+    name: "Uniswap v4 PoolManager (Base)",
+    protocol: "Uniswap v4",
+    role: "vault",
+    chain: "base",
+    address: "0x498581ff718922c3f8e6a244956af099b2652b2b",
+    riskNotes: [
+      "Singleton vault: holds ALL Uniswap v4 liquidity on Base in a single contract — the largest single concentration of protocol risk in the v4 system",
+      "A critical bug in this one contract would expose every v4 pool simultaneously",
+      "Protocol fee parameters controlled by Uniswap DAO via a 2-day governance timelock — no single-wallet admin",
+      "Audited pre-launch by OpenZeppelin, ABDK, and Trail of Bits; Immunefi bug bounty up to $2.25M",
+      "Flash accounting: novel transient storage delta model replaces per-action balance checks — adds smart contract complexity",
+      "Hooks: individual pools can attach custom hook contracts; hook code is external and not audited by Uniswap — hook risk varies per pool",
+    ],
+  },
+  {
+    name: "Uniswap v4 PositionManager (Base)",
+    protocol: "Uniswap v4",
+    role: "position-manager",
+    chain: "base",
+    address: "0x7c5f5a4bbd8fd63184577525326123b519429bdc",
+    riskNotes: [
+      "Manages v4 LP positions as ERC-721 NFTs — your LP is represented by an NFT token ID",
+      "Singleton architecture: all Uniswap v4 pool liquidity is stored inside one PoolManager contract (0x498581ff718922c3f8e6a244956af099b2652b2b) — a vulnerability in that single contract could affect every v4 pool simultaneously",
+      "Hooks: every v4 pool can have a custom hook contract that runs arbitrary code before and after swaps and liquidity changes — a malicious or buggy hook can drain funds or block withdrawals",
+      "No native gauge or emissions system in v4 — swap fee yield only, no token emissions to stake for",
+      "Pool key uniqueness: pools are identified by a bytes32 pool ID (currency0, currency1, fee, tickSpacing, hookAddress) — not a standalone contract address",
+      "Flash accounting: v4 uses a novel delta-accounting system in a single transaction — adds smart contract complexity vs v3",
+      "Governance: Uniswap DAO controls protocol-level fee parameters via a 2-day timelock — no single wallet admin",
+      "Audited by OpenZeppelin, ABDK, and Trail of Bits before mainnet launch; Uniswap runs an Immunefi bug bounty with up to $2.25M max payout",
+    ],
+  },
+  {
+    name: "Uniswap v4 Universal Router (Base)",
+    protocol: "Uniswap v4",
+    role: "router",
+    chain: "base",
+    address: "0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7",
+    riskNotes: [
+      "Stateless universal router: routes swaps across Uniswap v2, v3, and v4 pools in a single transaction",
+      "Immutable — no owner, no admin, no upgradeability",
+      "Does not hold user funds: all token transfers resolve atomically within the transaction",
+    ],
+  },
   // Maverick v2
   { name: "Maverick v2 Router (Base)", protocol: "Maverick v2", role: "router", chain: "base", address: "0x5eded0d7e76c563ff081ca01d9d12d6b404df527", riskNotes: ["Stateless router for Maverick v2 pools", "Maverick uses directional liquidity: LPs choose a movement mode (static, right, left, both)"] },
   // DackieSwap
@@ -567,9 +609,12 @@ export const POOL_CHECK_TEMPLATES: Record<PoolType, CheckTemplate[]> = {
     { functionName: "factory", description: "Pool factory address" },
   ],
   // Uniswap v4 — singleton PoolManager; hooks are the main new risk surface
+  // NOTE: these calls target the PoolManager singleton (all v4 liquidity lives here)
   "uniswap-v4": [
-    { functionName: "owner", description: "PoolManager owner (protocol governance)", riskIfTrue: "Can update protocol fees and fee controller" },
-    { functionName: "protocolFeeController", description: "Protocol fee controller address", riskIfTrue: "Controls protocol fee extraction from all pools" },
+    { functionName: "owner", description: "PoolManager owner — controls protocol-level fee parameters", riskIfTrue: "Owner can update protocol fees across all v4 pools; should be a DAO-controlled timelock, not an EOA" },
+    { functionName: "protocolFeeController", description: "Protocol fee controller — can set a protocol fee on any pool", riskIfTrue: "This address can activate a fee that skims a portion of every swap across all v4 pools; check if it is a multisig or DAO" },
+    { functionName: "isUnlocked", description: "PoolManager lock state — should be false when no tx is in flight", riskIfTrue: "PoolManager appears to be in a locked/unlocked state outside of a transaction — could indicate a reentrancy or flash accounting issue" },
+    { functionName: "MAX_SWAP_FEE", description: "Maximum swap fee cap enforced by the protocol (read-only sanity check)" },
   ],
   // Curve StableswapNG — next-gen stableswap factory pools
   "curve-stableswap-ng": [
@@ -625,6 +670,8 @@ export const KNOWN_TIMELOCKS: KnownTimelock[] = [
   { address: "0xbf1786c58a442da68769f8c4b88bde7fc15b53e6", chain: "ethereum", protocol: "Uniswap Governance", delaySeconds: 172800 },
   { address: "0x8392f6669292fa56123f71949b52d883ae57e225", chain: "ethereum", protocol: "Compound Governor Bravo", delaySeconds: 172800 },
   { address: "0xa6f2045a8dfa2b1a0c6fa3b9c39a32a51b0b25b3", chain: "ethereum", protocol: "Aave v3 Timelock", delaySeconds: 86400 },
+  // Uniswap v4 on Base: PoolManager owner is the Uniswap DAO bridged governance timelock
+  { address: "0x2f0df6e33e21474a7c8c56c77f9f1ab73db4e6ca", chain: "base", protocol: "Uniswap v4 Governance (Base)", delaySeconds: 172800 },
 ];
 
 // ─── Lookup Helpers ──────────────────────────────────────────────────────────
