@@ -4,6 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useState, useEffect } from "react";
 import ThemeToggle from "../components/ThemeToggle";
+import { saveRecentSearch } from "../page";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,7 @@ type ContractRisk = {
     token0Amount: string;
     token1Symbol: string;
     token1Amount: string;
+    tvlUsd?: number;
   };
 };
 
@@ -41,6 +43,7 @@ type AssetRisk = {
   assetType: string;
   trustLevel: TrustLevel;
   riskNotes: string[];
+  priceUsd?: number;
 };
 
 type YIFFCategory =
@@ -69,10 +72,34 @@ type PositionOverview = {
   positionType: string;
   chain: string;
   explorerTxUrl: string;
+  nftPriceRange?: { lower: number; upper: number; token0Symbol?: string; token1Symbol?: string };
 };
 
 type ScenarioImpact = "high" | "medium" | "low";
 type Scenario = { title: string; description: string; impact: ScenarioImpact; icon: string };
+
+type Audit = {
+  auditor: string;
+  date: string;
+  highestSeverity: "critical" | "high" | "medium" | "low" | "none";
+  notes: string;
+  url?: string;
+};
+
+type Exploit = {
+  date: string;
+  amountUsd?: number;
+  title: string;
+  description: string;
+  url?: string;
+};
+
+type GovernanceProposal = {
+  id: string;
+  title: string;
+  endsAt: number;
+  url: string;
+};
 
 type AnalysisResult = {
   txHash: string;
@@ -89,6 +116,9 @@ type AnalysisResult = {
   vulnerabilityChecks: VulnerabilityCheck[];
   scenariosThatCanGoWrong: Scenario[];
   howToProtectYourself: string[];
+  audits: Audit[];
+  exploits?: Exploit[];
+  activeProposals?: GovernanceProposal[];
   protocolFlow: { name: string; steps: FlowStep[]; callout: string } | null;
   protocolDocs: { docs: string; app: string } | null;
 };
@@ -169,13 +199,56 @@ const SEVERITY_ICON: Record<RiskLevel, string> = {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function formatAge(ts: number): string {
+// Concentrated-liquidity IL calculator.
+// For a position with range [Pa, Pb] and reference entry price P0,
+// returns the IL % at each boundary vs simply holding the same tokens.
+// Formula: derived from Uniswap v3 LP value equations (Atis Elsts, 2021).
+function calcCLIL(Pa: number, Pb: number, P0: number): { ilAtLower: number; ilAtUpper: number } | null {
+  if (Pa <= 0 || Pb <= 0 || P0 <= 0 || Pa >= Pb) return null;
+  const sqPa = Math.sqrt(Pa);
+  const sqPb = Math.sqrt(Pb);
+  const sqP0 = Math.sqrt(P0);
+
+  // Pool value per unit L at each price (in token1 units)
+  const V_lower = sqPa - Pa / sqPb;
+  const V_upper = sqPb - sqPa;
+
+  // Hold value (same initial composition) at each boundary
+  const H_lower = Pa / sqP0 - Pa / sqPb + sqP0 - sqPa;
+  const H_upper = Pb / sqP0 - sqPb + sqP0 - sqPa;
+
+  if (H_lower <= 0 || H_upper <= 0) return null;
+
+  return {
+    ilAtLower: (V_lower / H_lower - 1) * 100,
+    ilAtUpper: (V_upper / H_upper - 1) * 100,
+  };
+}
+
+function fmtUsd(n: number): string {
+  if (n >= 1e9) return `$${(n / 1e9).toLocaleString(undefined, { maximumFractionDigits: 2 })}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 })}M`;
+  if (n >= 1000) return `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  return `$${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function formatAge(ts: number): { label: string; riskColour: string } {
   const days = Math.floor((Date.now() / 1000 - ts) / 86400);
-  if (days < 1) return "deployed today";
-  if (days < 30) return `${days}d old`;
-  const months = Math.floor(days / 30);
-  if (months < 24) return `${months}mo old`;
-  return `${Math.floor(months / 12)}yr old`;
+  let label: string;
+  if (days < 1)        label = "deployed today";
+  else if (days < 7)   label = `${days} day${days === 1 ? "" : "s"} old`;
+  else if (days < 30)  label = `${Math.floor(days / 7)} week${Math.floor(days / 7) === 1 ? "" : "s"} old`;
+  else if (days < 365) label = `${Math.floor(days / 30)} month${Math.floor(days / 30) === 1 ? "" : "s"} old`;
+  else                 label = `${Math.floor(days / 365)} year${Math.floor(days / 365) === 1 ? "" : "s"} old`;
+
+  // Risk colour: new pools carry more uncertainty
+  const riskColour =
+    days < 30  ? "text-red-600 bg-red-50"     :   // < 1 month — very new
+    days < 90  ? "text-orange-600 bg-orange-50" :  // < 3 months — new
+    days < 180 ? "text-yellow-700 bg-yellow-50" :  // < 6 months — moderate
+                 "text-emerald-700 bg-emerald-50";  // 6 months+ — established
+
+  return { label, riskColour };
 }
 
 function explorerAddrUrl(chain: string, address: string): string {
@@ -221,10 +294,11 @@ export default function RiskToolPage() {
   const [error, setError] = useState("");
   const [result, setResult] = useState<AnalysisResult | null>(null);
 
-  // Pre-fill and auto-run when arriving via URL params (e.g. "See a sample analysis" link)
+  // Pre-fill and auto-run when arriving via URL params (shareable links + "See a sample" link)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const tx = params.get("tx");
+    // support both ?input= (new) and ?tx= (old links)
+    const tx = params.get("input") ?? params.get("tx");
     const c = params.get("chain");
     const resolvedChain = c === "ethereum" || c === "base" ? c : "base";
     if (!tx) return;
@@ -238,7 +312,7 @@ export default function RiskToolPage() {
     fetch("/api/risk", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ txHash: tx.trim(), chain: resolvedChain }),
+      body: JSON.stringify({ input: tx.trim(), chain: resolvedChain }),
     })
       .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
       .then(({ ok, data }) => {
@@ -261,11 +335,15 @@ export default function RiskToolPage() {
       const res = await fetch("/api/risk", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ txHash: txHash.trim(), chain }),
+        body: JSON.stringify({ input: txHash.trim(), chain }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Analysis failed");
       setResult(data);
+      saveRecentSearch(txHash.trim(), chain);
+      // Push shareable URL so the user can copy it from the address bar
+      const params = new URLSearchParams({ input: txHash.trim(), chain });
+      window.history.pushState({}, "", `?${params.toString()}`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -301,12 +379,17 @@ export default function RiskToolPage() {
 
         {result && !loading && (
           <>
+            {result.activeProposals && result.activeProposals.length > 0 && (
+              <ActiveProposalsBanner proposals={result.activeProposals} protocol={result.positionOverview.protocol} />
+            )}
             <HeroRow result={result} />
             {result.protocolFlow && <PositionMap flow={result.protocolFlow} />}
             <div className="mt-6 grid gap-6 lg:grid-cols-3">
               <div className="lg:col-span-2 space-y-6">
                 <VulnerabilityAssessment key={result.txHash} checks={result.vulnerabilityChecks} narrative={result.aiNarrative} />
                 <ContractAnalysis contracts={result.contracts} chain={result.chain} />
+                {result.audits?.length > 0 && <AuditList audits={result.audits} />}
+                {result.exploits && result.exploits.length > 0 && <ExploitTimeline exploits={result.exploits} />}
                 {result.sources.length > 0 && <Sources sources={result.sources} />}
               </div>
               <div className="space-y-4">
@@ -338,7 +421,7 @@ function Header() {
         <Image src="/Logo.png" alt="Iceberg" width={36} height={36} className="rounded-lg" />
         <div>
           <div className={`text-xl font-bold leading-none ${INK}`}>Iceberg</div>
-          <div className={`mt-0.5 text-xs ${MUTED}`}>The risk beneath your yield</div>
+          <div className={`mt-0.5 text-xs ${MUTED} hidden sm:block`}>The risk beneath your yield</div>
         </div>
       </Link>
       <div className="flex items-center gap-3">
@@ -350,7 +433,7 @@ function Header() {
           className="flex items-center gap-2 text-sm text-slate-600 hover:text-slate-900 transition-colors"
         >
           <Image src="/cat-dad.png" alt="CatDad0x" width={26} height={26} className="rounded-full" />
-          Built by @CatDad0x
+          <span className="hidden sm:inline">Built by @CatDad0x</span>
         </a>
       </div>
     </div>
@@ -386,7 +469,7 @@ function SearchBar({
         value={txHash}
         onChange={(e) => setTxHash(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && analyze()}
-        placeholder="Paste a yield farming transaction hash (0x...)"
+        placeholder="Paste a tx hash or pool / gauge address (0x...)"
         className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-700 placeholder:text-slate-400"
       />
       <button
@@ -400,35 +483,114 @@ function SearchBar({
   );
 }
 
+function ActiveProposalsBanner({ proposals, protocol }: { proposals: GovernanceProposal[]; protocol: string }) {
+  function timeLeft(endsAt: number): string {
+    const secs = endsAt - Date.now() / 1000;
+    if (secs < 3600)  return `${Math.round(secs / 60)}m left`;
+    if (secs < 86400) return `${Math.round(secs / 3600)}h left`;
+    return `${Math.round(secs / 86400)}d left`;
+  }
+  return (
+    <div className="mt-4 rounded-2xl border border-yellow-300 bg-yellow-50 px-4 py-3">
+      <div className="flex items-start gap-3">
+        <span className="text-xl">⚡</span>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-yellow-900">
+            {proposals.length} active governance vote{proposals.length > 1 ? "s" : ""} on {protocol}
+          </p>
+          <p className="mt-0.5 text-xs text-yellow-800">
+            An open vote could change how this protocol works — fees, emissions, or contract upgrades. Check before committing funds.
+          </p>
+          <div className="mt-2 space-y-1.5">
+            {proposals.map((p) => (
+              <a
+                key={p.id}
+                href={p.url}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center justify-between gap-3 rounded-lg bg-yellow-100 px-3 py-1.5 hover:bg-yellow-200 transition-colors"
+              >
+                <span className="text-xs font-medium text-yellow-900 truncate">{p.title}</span>
+                <span className="shrink-0 text-[11px] text-yellow-700 font-semibold">{timeLeft(p.endsAt)} ↗</span>
+              </a>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CopyLinkButton() {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+  return (
+    <button
+      onClick={copy}
+      className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+    >
+      {copied ? (
+        <>
+          <svg className="h-3.5 w-3.5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+          </svg>
+          Copied!
+        </>
+      ) : (
+        <>
+          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          </svg>
+          Share
+        </>
+      )}
+    </button>
+  );
+}
+
 function StickyBar({ result }: { result: AnalysisResult }) {
   const v = verdict(result.riskScore);
   const counts = countByLevel(result.vulnerabilityChecks);
   return (
     <div className="sticky top-0 z-40 border-b border-slate-200 bg-[#F4F7FA]/90 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-2.5 text-sm">
-        <div className="flex items-center gap-3">
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 sm:px-6 py-2.5 text-sm">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <IcebergSVG score={result.riskScore} size={36} compact />
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
             <span className={`font-semibold ${INK}`}>{result.riskScore}</span>
             <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${v.colour}`}>
               {v.text}
             </span>
-            <span className={`${MUTED} text-xs`}>
+            <span className={`${MUTED} text-xs truncate hidden sm:inline`}>
               {result.positionOverview.protocol}
               {result.positionOverview.pair ? ` · ${result.positionOverview.pair}` : ""}
             </span>
           </div>
         </div>
-        <div className={`flex items-center gap-3 text-xs ${MUTED}`}>
-          <span className="flex items-center gap-1">
-            <span className="h-2 w-2 rounded-full bg-emerald-500" /> {counts.ok} ok
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="h-2 w-2 rounded-full bg-yellow-400" /> {counts.caveats} caveats
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="h-2 w-2 rounded-full bg-red-500" /> {counts.critical} critical
-          </span>
+        <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+          <div className={`hidden sm:flex items-center gap-3 text-xs ${MUTED}`}>
+            <span className="flex items-center gap-1">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" /> {counts.ok} ok
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-2 w-2 rounded-full bg-yellow-400" /> {counts.caveats} caveats
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-2 w-2 rounded-full bg-red-500" /> {counts.critical} critical
+            </span>
+          </div>
+          {/* Mobile: condensed dot summary */}
+          <div className={`flex sm:hidden items-center gap-1.5 text-xs ${MUTED}`}>
+            <span className="flex items-center gap-0.5"><span className="h-2 w-2 rounded-full bg-red-500" />{counts.critical}</span>
+            <span className="flex items-center gap-0.5"><span className="h-2 w-2 rounded-full bg-yellow-400" />{counts.caveats}</span>
+            <span className="flex items-center gap-0.5"><span className="h-2 w-2 rounded-full bg-emerald-500" />{counts.ok}</span>
+          </div>
+          <CopyLinkButton />
         </div>
       </div>
     </div>
@@ -474,7 +636,7 @@ function HeroRow({ result }: { result: AnalysisResult }) {
   return (
     <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-4">
       {/* Iceberg score card */}
-      <div className={`${SURFACE} rounded-2xl p-5 shadow-sm`}>
+      <div className={`${SURFACE} rounded-2xl p-5 shadow-sm flex flex-col`}>
         <div className={`text-xs uppercase tracking-wide ${MUTED}`}>Iceberg Score</div>
         <div className="mt-3 flex items-center gap-4">
           <IcebergSVG score={result.riskScore} size={72} />
@@ -488,7 +650,7 @@ function HeroRow({ result }: { result: AnalysisResult }) {
             </span>
           </div>
         </div>
-        <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4">
+        <div className="mt-auto flex h-[64px] items-center justify-between border-t border-slate-100">
           <div className="text-center">
             <div className={`text-lg font-bold ${counts.critical > 0 ? "text-red-600" : INK}`}>{counts.critical}</div>
             <div className={`text-[10px] ${MUTED}`}>critical</div>
@@ -518,28 +680,54 @@ function ProtocolCard({ result }: { result: AnalysisResult }) {
     <div className={`${SURFACE} rounded-2xl p-5 shadow-sm flex flex-col`}>
       <Label icon="🏛">Protocol</Label>
       <div className={`mt-3 text-base font-semibold ${INK}`}>{result.positionOverview.protocol}</div>
-      <div className={`text-xs ${MUTED} leading-relaxed`}>{result.positionOverview.positionType}</div>
-      {result.protocolDocs && (
-        <div className="mt-3 flex flex-wrap gap-1.5 pt-3 border-t border-slate-100">
-          <DocChip href={result.protocolDocs.docs}>Docs</DocChip>
-          <DocChip href={result.protocolDocs.app}>App</DocChip>
-        </div>
-      )}
+      <div className="mt-auto flex h-[64px] items-center border-t border-slate-100">
+        {result.protocolDocs ? (
+          <div className="flex flex-wrap gap-1.5">
+            <DocChip href={result.protocolDocs.docs}>Docs</DocChip>
+            <DocChip href={result.protocolDocs.app}>App</DocChip>
+          </div>
+        ) : (
+          <span className={`text-[11px] ${MUTED}`}>{result.positionOverview.positionType}</span>
+        )}
+      </div>
     </div>
   );
 }
 
 function PoolCard({ result }: { result: AnalysisResult }) {
   const poolContract = result.contracts.find((c) => c.poolType);
+  const tvl = poolContract?.poolReserves?.tvlUsd;
+  const age = poolContract?.deployedAt ? formatAge(poolContract.deployedAt) : null;
   return (
-    <div className={`${SURFACE} rounded-2xl p-5 shadow-sm`}>
+    <div className={`${SURFACE} rounded-2xl p-5 shadow-sm flex flex-col`}>
       <Label icon="💧">Pool</Label>
       <div className={`mt-3 text-base font-semibold ${INK}`}>{result.positionOverview.pair ?? "Unknown"}</div>
       <div className={`text-xs ${MUTED}`}>
         {result.positionOverview.feePercent !== undefined ? `${result.positionOverview.feePercent}% fee tier` : "Fee unknown"}
       </div>
-      {poolContract && (
-        <div className="mt-3 pt-3 border-t border-slate-100">
+      {(tvl !== undefined || age) && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {tvl !== undefined && (
+            <>
+              <span className={`text-xs font-semibold ${INK}`}>{fmtUsd(tvl)}</span>
+              <span className={`text-xs ${MUTED}`}>TVL</span>
+              {tvl < 100_000 && (
+                <span className="rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700">Low liquidity</span>
+              )}
+              {tvl >= 10_000_000 && (
+                <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">Deep liquidity</span>
+              )}
+            </>
+          )}
+          {age && (
+            <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${age.riskColour}`}>
+              {age.label}
+            </span>
+          )}
+        </div>
+      )}
+      <div className="mt-auto flex h-[64px] items-center border-t border-slate-100">
+        {poolContract ? (
           <a
             href={explorerAddrUrl(result.chain, poolContract.address)}
             target="_blank"
@@ -549,15 +737,17 @@ function PoolCard({ result }: { result: AnalysisResult }) {
           >
             {poolContract.address.slice(0, 8)}…{poolContract.address.slice(-6)} ↗
           </a>
-        </div>
-      )}
+        ) : (
+          <span className={`text-[11px] ${MUTED}`}>Pool address unknown</span>
+        )}
+      </div>
     </div>
   );
 }
 
 function ChainCard({ result }: { result: AnalysisResult }) {
   return (
-    <div className={`${SURFACE} rounded-2xl p-5 shadow-sm`}>
+    <div className={`${SURFACE} rounded-2xl p-5 shadow-sm flex flex-col`}>
       <Label icon={chainIcon(result.chain)}>Chain</Label>
       <div className={`mt-3 text-base font-semibold ${INK}`}>
         {result.chain.charAt(0).toUpperCase() + result.chain.slice(1)}
@@ -565,7 +755,7 @@ function ChainCard({ result }: { result: AnalysisResult }) {
       <div className={`text-xs ${MUTED}`}>
         {result.chain === "base" ? "Coinbase L2 Optimistic Rollup" : "Layer 1"}
       </div>
-      <div className="mt-3 pt-3 border-t border-slate-100">
+      <div className="mt-auto flex h-[64px] items-center border-t border-slate-100">
         <a
           href={result.positionOverview.explorerTxUrl}
           target="_blank"
@@ -856,22 +1046,30 @@ function LegendDot({ colour, label }: { colour: string; label: string }) {
 }
 
 function CategoryGroup({ category, checks }: { category: YIFFCategory; checks: VulnerabilityCheck[] }) {
+  // Within Pool Security: "Withdrawal / Exit" is the least interesting check — push it to the bottom
+  const sorted = category === "Pool Security"
+    ? [
+        ...checks.filter((c) => !c.title.toLowerCase().includes("withdrawal") && !c.title.toLowerCase().includes("exit")),
+        ...checks.filter((c) =>  c.title.toLowerCase().includes("withdrawal") ||  c.title.toLowerCase().includes("exit")),
+      ]
+    : checks;
+
   return (
     <details className="rounded-xl border border-slate-200">
       <summary className="flex cursor-pointer items-center justify-between px-4 py-3 select-none">
         <div className="flex items-center gap-2">
           <span className="text-base">{CATEGORY_ICON[category]}</span>
           <span className={`text-sm font-semibold ${INK}`}>{category}</span>
-          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">{checks.length}</span>
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">{sorted.length}</span>
         </div>
         <div className="flex items-center gap-1">
-          {checks.map((c, i) => (
+          {sorted.map((c, i) => (
             <span key={i} className={`h-2 w-2 rounded-full ${SEVERITY_DOT[c.severity]}`} />
           ))}
         </div>
       </summary>
       <div className="border-t border-slate-100">
-        {checks.map((c, i) => (
+        {sorted.map((c, i) => (
           <CheckRow key={i} check={c} />
         ))}
       </div>
@@ -1023,12 +1221,15 @@ function ContractDetail({ contract, chain }: { contract: ContractRisk; chain: st
                   {contract.isVerified ? "✓ Verified" : "✗ Unverified"}
                 </span>
               )}
-              {contract.deployedAt && (
-                <span className={MUTED}>
-                  Deployed: <span className={INK}>{formatAge(contract.deployedAt)}</span>
-                  {" "}({new Date(contract.deployedAt * 1000).toLocaleDateString("en-GB", { month: "short", year: "numeric" })})
-                </span>
-              )}
+              {contract.deployedAt && (() => {
+                const age = formatAge(contract.deployedAt);
+                return (
+                  <span className={MUTED}>
+                    Deployed: <span className={INK}>{age.label}</span>
+                    {" "}({new Date(contract.deployedAt * 1000).toLocaleDateString("en-GB", { month: "short", year: "numeric" })})
+                  </span>
+                );
+              })()}
               {contract.creatorAddress && (
                 <span className={MUTED}>
                   Creator:{" "}
@@ -1207,6 +1408,13 @@ function AssetRow({ asset, chain }: { asset: AssetRisk; chain: string }) {
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className={`text-sm font-semibold ${INK}`}>{asset.symbol}</span>
+            {asset.priceUsd !== undefined && (
+              <span className={`text-sm font-semibold ${MUTED}`}>
+                {asset.priceUsd >= 1
+                  ? `$${asset.priceUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                  : `$${asset.priceUsd.toLocaleString(undefined, { maximumSignificantDigits: 4 })}`}
+              </span>
+            )}
             <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${trustTagColour}`}>{trustTag}</span>
           </div>
           <div className={`mt-0.5 text-xs ${MUTED}`}>{asset.name}</div>
@@ -1325,6 +1533,108 @@ function HowToProtectYourselfSidebar({ items }: { items: string[] }) {
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+const SEVERITY_AUDIT: Record<Audit["highestSeverity"], { label: string; colour: string }> = {
+  critical: { label: "Critical found",  colour: "bg-red-100 text-red-700" },
+  high:     { label: "High found",      colour: "bg-orange-100 text-orange-700" },
+  medium:   { label: "Medium found",    colour: "bg-yellow-100 text-yellow-800" },
+  low:      { label: "Low / info only", colour: "bg-blue-100 text-blue-700" },
+  none:     { label: "No issues found", colour: "bg-emerald-100 text-emerald-700" },
+};
+
+function AuditList({ audits }: { audits: Audit[] }) {
+  return (
+    <div className={`${SURFACE} rounded-2xl p-5 shadow-sm`}>
+      <div className="flex items-center gap-2 mb-3">
+        <span>🔍</span>
+        <h2 className={`text-base font-semibold ${INK}`}>Audit Reports</h2>
+        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">{audits.length}</span>
+      </div>
+      <div className="space-y-3">
+        {audits.map((a, i) => {
+          const sev = SEVERITY_AUDIT[a.highestSeverity] ?? SEVERITY_AUDIT.none;
+          return (
+            <div key={i} className="flex items-start gap-3 border-b border-slate-100 pb-3 last:border-b-0 last:pb-0">
+              <div className="flex-1 min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`text-sm font-semibold ${INK}`}>{a.auditor}</span>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${sev.colour}`}>{sev.label}</span>
+                  <span className={`text-xs ${MUTED}`}>{a.date}</span>
+                </div>
+                <p className={`mt-0.5 text-xs ${MUTED}`}>{a.notes}</p>
+              </div>
+              {a.url && (
+                <a
+                  href={a.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-medium hover:bg-slate-50 transition-colors"
+                  style={{ color: ICE_DARK }}
+                >
+                  Report ↗
+                </a>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ExploitTimeline({ exploits }: { exploits: Exploit[] }) {
+  return (
+    <div className={`${SURFACE} rounded-2xl p-5 shadow-sm`}>
+      <div className="flex items-center gap-2 mb-3">
+        <span>💀</span>
+        <h2 className={`text-base font-semibold ${INK}`}>Exploit History</h2>
+        <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+          {exploits.length} incident{exploits.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+      <p className={`mb-3 text-xs ${MUTED}`}>
+        Past exploits on this protocol — amounts are approximate at time of incident.
+      </p>
+      <div className="relative space-y-0">
+        {exploits.map((e, i) => (
+          <div key={i} className="flex gap-3">
+            {/* Timeline spine */}
+            <div className="flex flex-col items-center">
+              <div className="mt-1 h-3 w-3 shrink-0 rounded-full border-2 border-red-500 bg-white" />
+              {i < exploits.length - 1 && (
+                <div className="w-0.5 flex-1 bg-red-200 mt-0.5 mb-0" style={{ minHeight: "28px" }} />
+              )}
+            </div>
+            {/* Content */}
+            <div className="flex-1 pb-4 last:pb-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`text-xs font-semibold ${INK}`}>{e.title}</span>
+                {e.amountUsd !== undefined && (
+                  <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+                    {fmtUsd(e.amountUsd)} lost
+                  </span>
+                )}
+                <span className={`text-[10px] ${MUTED}`}>{e.date}</span>
+              </div>
+              <p className={`mt-0.5 text-xs leading-relaxed ${MUTED}`}>{e.description}</p>
+              {e.url && (
+                <a
+                  href={e.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1 inline-block text-[11px] hover:underline"
+                  style={{ color: "#1E4E6E" }}
+                >
+                  Read post-mortem ↗
+                </a>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

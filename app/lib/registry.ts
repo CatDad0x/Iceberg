@@ -12,6 +12,17 @@ export type PoolType =
   | "velodrome-v2"
   | "aerodrome-v2"
   | "aerodrome-slipstream"
+  | "sushiswap-v3"
+  | "pancakeswap-v3"
+  | "baseswap-v2"
+  | "alienbase-v2"
+  | "equalizer-v2"
+  | "uniswap-v4"
+  | "curve-stableswap-ng"
+  | "curve-twocrypto-ng"
+  | "maverick-v2"
+  | "dackieswap-v3"
+  | "swapbased-v2"
   | "unknown";
 
 export type AssetType =
@@ -54,6 +65,22 @@ export const POOL_FACTORIES: PoolFactory[] = [
   { name: "Aerodrome SlipStream (CL)", poolType: "aerodrome-slipstream", chain: "base", factoryAddress: "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a" },
   { name: "Uniswap v3 (Base)", poolType: "uniswap-v3", chain: "base", factoryAddress: "0x33128a8fc17869897dce68ed026d694621f6fdfd" },
   { name: "Uniswap v2 (Base)", poolType: "uniswap-v2", chain: "base", factoryAddress: "0x8909dc15e40173ff4699343b6eb8132c65e18ec6" },
+  { name: "SushiSwap v3 (Base)", poolType: "sushiswap-v3", chain: "base", factoryAddress: "0xc35dadb65012ec5796536bd9864ed8773abc74c4" },
+  { name: "PancakeSwap v3 (Base)", poolType: "pancakeswap-v3", chain: "base", factoryAddress: "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865" },
+  { name: "Balancer v2 (Base)", poolType: "balancer-weighted", chain: "base", factoryAddress: "0xba12222222228d8ba445958a75a0704d566bf2c8" },
+  { name: "BaseSwap (Base)", poolType: "baseswap-v2", chain: "base", factoryAddress: "0xfda619b6d20975be80a10332cd39b9a4b0faa8bb" },
+  { name: "Alienbase (Base)", poolType: "alienbase-v2", chain: "base", factoryAddress: "0x3e84d913803b02a4a7f027165e8ca42c14c0fde7" },
+  { name: "Equalizer (Base)", poolType: "equalizer-v2", chain: "base", factoryAddress: "0xed8db60acc29e14bc867a497d94ca6e3ceb5ec04" },
+  // Uniswap v4 — singleton PoolManager (no per-pool factory; the PoolManager IS the registry)
+  { name: "Uniswap v4 PoolManager (Base)", poolType: "uniswap-v4", chain: "base", factoryAddress: "0x498581ff718922c3f8e6a244956af099b2652b2b" },
+  // Curve on Base (StableswapNG + TwocryptoNG)
+  { name: "Curve StableswapNG (Base)", poolType: "curve-stableswap-ng", chain: "base", factoryAddress: "0xd2002373543ce3527023c75e7518c274a51ce712" },
+  // Maverick v2 — directional liquidity AMM
+  { name: "Maverick v2 (Base)", poolType: "maverick-v2", chain: "base", factoryAddress: "0x0a7e848aca42d879ef06507fca0e7b33a0a63c1e" },
+  // DackieSwap — Base-native Uniswap v3 fork
+  { name: "DackieSwap v3 (Base)", poolType: "dackieswap-v3", chain: "base", factoryAddress: "0x3d237ac6d2f425d2e890cc99198818cc1fa48870" },
+  // SwapBased — Base-native Uniswap v2 fork
+  { name: "SwapBased (Base)", poolType: "swapbased-v2", chain: "base", factoryAddress: "0x04c9f118d21e8b767d2e50c946f0cc9f6c367300" },
 ];
 
 // ─── Known Protocol Contracts (routers, position managers, etc.) ─────────────
@@ -79,6 +106,18 @@ export const PROTOCOL_CONTRACTS: ProtocolContract[] = [
   { name: "Aerodrome SlipStream NFT Position Manager", protocol: "Aerodrome SlipStream", role: "position-manager", chain: "base", address: "0x827922686190790b37229fd06084350e74485b72", riskNotes: ["Manages concentrated liquidity positions as NFTs (similar to Uniswap v3)", "You receive an NFT representing your LP position", "Position parameters (tick range, fee tier) are baked into the NFT", "Standard fork of Uniswap v3 NonfungiblePositionManager"] },
   { name: "Uniswap v3 Router (Base)", protocol: "Uniswap v3", role: "router", chain: "base", address: "0x2626664c2603336e57b271c5c0b26f421741e481", riskNotes: ["Stateless router", "Immutable"] },
   { name: "Uniswap v3 Position Manager (Base)", protocol: "Uniswap v3", role: "position-manager", chain: "base", address: "0x03a520b32c04bf3beef7beb72e919cf822ed34f1", riskNotes: ["Manages v3 positions as NFTs", "Standard Uniswap deployment"] },
+  { name: "SushiSwap v3 Position Manager (Base)", protocol: "SushiSwap v3", role: "position-manager", chain: "base", address: "0x80c7dd17b01855a6d2347444a0fcc36136a314de", riskNotes: ["Manages concentrated liquidity positions as NFTs", "Fork of Uniswap v3 NonfungiblePositionManager"] },
+  { name: "PancakeSwap v3 Position Manager (Base)", protocol: "PancakeSwap v3", role: "position-manager", chain: "base", address: "0x46a15b0b27311cedf172ab29e4f4766fbe7f4364", riskNotes: ["Manages concentrated liquidity positions as NFTs", "Fork of Uniswap v3 NonfungiblePositionManager"] },
+  { name: "Equalizer Router (Base)", protocol: "Equalizer", role: "router", chain: "base", address: "0x2f87bf58d5a9b2efade55cdbd46153a0902be6fa", riskNotes: ["Stateless router: funds pass through, not held", "Routes swaps and liquidity adds across Equalizer pools"] },
+  { name: "Equalizer Voter (Base)", protocol: "Equalizer", role: "voter", chain: "base", address: "0x46abb88ae1f2a35ea559925d99fdc5441b592687", riskNotes: ["Controls SCALE emissions to gauges", "Governance: veSCALE holders vote weekly", "Can kill gauges, redirecting emissions"] },
+  { name: "Equalizer Gauge Factory (Base)", protocol: "Equalizer", role: "gauge-factory", chain: "base", address: "0xb136b45e3e241bb0d0c037395446cf42e4db13d6", riskNotes: ["Deploys new gauges for Equalizer pools"] },
+  // Uniswap v4
+  { name: "Uniswap v4 PositionManager (Base)", protocol: "Uniswap v4", role: "position-manager", chain: "base", address: "0x7c5f5a4bbd8fd63184577525326123b519429bdc", riskNotes: ["Manages v4 LP positions as NFTs", "Singleton: all v4 pool state lives in the PoolManager", "Hooks can add custom logic per pool — check hook address for each pool"] },
+  { name: "Uniswap v4 Universal Router (Base)", protocol: "Uniswap v4", role: "router", chain: "base", address: "0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7", riskNotes: ["Stateless universal router for v2/v3/v4 swaps", "Immutable, no admin"] },
+  // Maverick v2
+  { name: "Maverick v2 Router (Base)", protocol: "Maverick v2", role: "router", chain: "base", address: "0x5eded0d7e76c563ff081ca01d9d12d6b404df527", riskNotes: ["Stateless router for Maverick v2 pools", "Maverick uses directional liquidity: LPs choose a movement mode (static, right, left, both)"] },
+  // DackieSwap
+  { name: "DackieSwap Smart Router (Base)", protocol: "DackieSwap", role: "router", chain: "base", address: "0x195fbc5b8fbd5ac739c1ba57d4ef6d5a704f34f7", riskNotes: ["Routes trades across DackieSwap v2 and v3 pools", "Uniswap v3 fork: standard router interface"] },
 ];
 
 // ─── Known Assets ────────────────────────────────────────────────────────────
@@ -269,7 +308,7 @@ export const KNOWN_ASSETS: KnownAsset[] = [
     ],
   },
 
-  // ── USDC on Base (bridged) ──
+  // ── USDC on Base ──
   {
     symbol: "USDC",
     name: "USD Coin (Base)",
@@ -283,7 +322,82 @@ export const KNOWN_ASSETS: KnownAsset[] = [
       "Circle can technically freeze sanctioned addresses; in practice this almost never affects ordinary users",
     ],
   },
+
+  // ── DAI on Base (bridged via Base native bridge) ──
+  {
+    symbol: "DAI",
+    name: "Dai Stablecoin (Base)",
+    assetType: "bridged",
+    chain: "base",
+    address: "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",
+    decimals: 18,
+    bridgeType: "base-native",
+    riskNotes: [
+      "Bridged DAI via Base native bridge — NOT the same address as Ethereum mainnet DAI",
+      "Stacked risk: MakerDAO governance + Base native bridge + Base L2 sequencer",
+      "7-day withdrawal window to return to Ethereum mainnet",
+    ],
+  },
+
+  // ── AERO (Aerodrome governance + emissions token) ──
+  {
+    symbol: "AERO",
+    name: "Aerodrome Finance",
+    assetType: "standard-erc20",
+    chain: "base",
+    address: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+    decimals: 18,
+    underlyingProtocol: "Aerodrome",
+    riskNotes: [
+      "Inflationary emissions token: supply increases weekly via gauge rewards",
+      "Value is driven by protocol fees and veAERO voting demand — not pegged to anything",
+      "Aerodrome team controls emissions schedule via governance",
+    ],
+  },
+
+  // ── cbBTC (Coinbase Wrapped Bitcoin on Base) ──
+  {
+    symbol: "cbBTC",
+    name: "Coinbase Wrapped BTC",
+    assetType: "standard-erc20",
+    chain: "base",
+    address: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+    decimals: 8,
+    underlyingProtocol: "Coinbase",
+    riskNotes: [
+      "Custodial: Coinbase holds the underlying BTC",
+      "Coinbase can freeze or burn cbBTC at any address",
+      "Redemption depends on Coinbase remaining solvent and compliant",
+      "Not trustless — similar centralisation risk to WBTC",
+    ],
+  },
 ];
+
+// ─── Protocol Subgraphs ──────────────────────────────────────────────────────
+// Subgraph endpoints for fetching pool reserves more reliably than RPC.
+// Requires THEGRAPH_API_KEY in .env.local for decentralised network subgraphs.
+
+export type ProtocolSubgraph = {
+  protocol: string;       // matches against detectedProtocol (case-insensitive substring)
+  chain: Chain;
+  subgraphId: string;     // The Graph decentralised network subgraph ID
+  // Query fields: token0/token1 reserves field names differ between AMM types
+  reserveField: "reserve0/reserve1" | "totalValueLockedToken0/totalValueLockedToken1";
+};
+
+export const PROTOCOL_SUBGRAPHS: ProtocolSubgraph[] = [
+  {
+    protocol: "aerodrome",
+    chain: "base",
+    subgraphId: "GENunSHWLBXm59mBSgPzQ8metBEp9YDfdqwFr91Av1UM",
+    reserveField: "totalValueLockedToken0/totalValueLockedToken1",
+  },
+];
+
+export function findSubgraph(protocol: string, chain: Chain): ProtocolSubgraph | undefined {
+  const needle = protocol.toLowerCase();
+  return PROTOCOL_SUBGRAPHS.find((s) => s.chain === chain && needle.includes(s.protocol));
+}
 
 // ─── Bridge Signatures ───────────────────────────────────────────────────────
 
@@ -413,6 +527,65 @@ export const POOL_CHECK_TEMPLATES: Record<PoolType, CheckTemplate[]> = {
     { functionName: "factory", description: "Pool factory address" },
     { functionName: "gauge", description: "Associated gauge contract", riskIfTrue: "Pool has a gauge: emissions can be killed via voter" },
   ],
+  // Uniswap v3 forks — identical interface, same checks
+  "sushiswap-v3": [
+    { functionName: "owner", description: "Pool owner / factory owner", riskIfTrue: "Can enable fee on pool" },
+    { functionName: "feeProtocol", description: "Protocol fee enabled", riskIfTrue: "Protocol fee active: portion of swap fees goes to SushiSwap" },
+  ],
+  "pancakeswap-v3": [
+    { functionName: "owner", description: "Pool owner / factory owner", riskIfTrue: "Can enable fee on pool" },
+    { functionName: "feeProtocol", description: "Protocol fee enabled", riskIfTrue: "Protocol fee active: portion of swap fees goes to PancakeSwap" },
+  ],
+  // Uniswap v2 forks — identical interface, same checks
+  "baseswap-v2": [
+    { functionName: "feeTo", description: "Fee recipient", riskIfTrue: "Non-zero address receives a cut of all swap fees" },
+    { functionName: "feeToSetter", description: "Who can change the fee recipient", riskIfTrue: "This address can redirect all protocol fees" },
+  ],
+  "alienbase-v2": [
+    { functionName: "feeTo", description: "Fee recipient", riskIfTrue: "Non-zero address receives a cut of all swap fees" },
+    { functionName: "feeToSetter", description: "Who can change the fee recipient", riskIfTrue: "This address can redirect all protocol fees" },
+  ],
+  "equalizer-v2": [
+    { functionName: "isAlive", description: "Gauge is active", riskIfFalse: "Gauge is killed: no more SCALE emissions to this pool" },
+    { functionName: "voter", description: "Voter contract address", riskIfTrue: "Voter controls gauge weights and emissions: check who controls voter" },
+    { functionName: "fee", description: "Pool swap fee" },
+    { functionName: "factory", description: "Pool factory address" },
+  ],
+  // Uniswap v4 — singleton PoolManager; hooks are the main new risk surface
+  "uniswap-v4": [
+    { functionName: "owner", description: "PoolManager owner (protocol governance)", riskIfTrue: "Can update protocol fees and fee controller" },
+    { functionName: "protocolFeeController", description: "Protocol fee controller address", riskIfTrue: "Controls protocol fee extraction from all pools" },
+  ],
+  // Curve StableswapNG — next-gen stableswap factory pools
+  "curve-stableswap-ng": [
+    { functionName: "is_killed", description: "Pool is killed (deposits disabled)", riskIfTrue: "Pool is killed: only withdrawals allowed" },
+    { functionName: "admin_fee", description: "Admin fee percentage", riskIfTrue: "Admin receives a share of trading fees" },
+    { functionName: "owner", description: "Pool owner / admin", riskIfTrue: "Check if EOA or multisig: EOA with no timelock is highest risk" },
+    { functionName: "future_owner", description: "Pending ownership transfer", riskIfTrue: "Ownership transfer queued: new owner has not yet accepted" },
+    { functionName: "A", description: "Amplification coefficient (A parameter)", riskIfTrue: "Low A value reduces pool stability for pegged assets" },
+    { functionName: "future_A", description: "Pending A parameter change", riskIfTrue: "A ramp in progress: price mechanics actively changing" },
+  ],
+  // Curve TwocryptoNG — next-gen volatile asset pools
+  "curve-twocrypto-ng": [
+    { functionName: "admin_fee", description: "Admin fee", riskIfTrue: "Admin takes a share of fees" },
+    { functionName: "owner", description: "Pool owner", riskIfTrue: "Check if EOA vs multisig" },
+    { functionName: "allowed_extra_profit", description: "Profit parameter", riskIfTrue: "Controls profit extraction mechanics: check if recently changed" },
+  ],
+  // Maverick v2 — directional liquidity (mode-based LPs)
+  "maverick-v2": [
+    { functionName: "fee", description: "Pool swap fee" },
+    { functionName: "factory", description: "Pool factory address" },
+  ],
+  // DackieSwap v3 — Uniswap v3 fork
+  "dackieswap-v3": [
+    { functionName: "owner", description: "Pool owner / factory owner", riskIfTrue: "Can enable fee on pool" },
+    { functionName: "feeProtocol", description: "Protocol fee enabled", riskIfTrue: "Protocol fee active: portion of swap fees goes to DackieSwap" },
+  ],
+  // SwapBased — Uniswap v2 fork
+  "swapbased-v2": [
+    { functionName: "feeTo", description: "Fee recipient", riskIfTrue: "Non-zero address receives a cut of all swap fees" },
+    { functionName: "feeToSetter", description: "Who can change the fee recipient", riskIfTrue: "This address can redirect all protocol fees" },
+  ],
   unknown: [],
 };
 
@@ -451,6 +624,10 @@ export function findPoolFactory(address: string, chain: Chain): PoolFactory | un
   return POOL_FACTORIES.find(
     (f) => f.factoryAddress.toLowerCase() === address.toLowerCase() && f.chain === chain
   );
+}
+
+export function findPoolFactoryByType(poolType: PoolType, chain: Chain): PoolFactory | undefined {
+  return POOL_FACTORIES.find((f) => f.poolType === poolType && f.chain === chain);
 }
 
 export function findKnownAsset(address: string, chain: Chain): KnownAsset | undefined {

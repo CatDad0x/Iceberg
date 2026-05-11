@@ -2,12 +2,47 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import ThemeToggle from "./components/ThemeToggle";
 
 const SAMPLE_TX = "0x19e9fe153c5cdebaea8816ed4ff766f1aa47bb552bd97adc68ec1544bd656adb";
 const SAMPLE_CHAIN = "base";
+
+// ─── Supported protocols ──────────────────────────────────────────────────────
+
+type Protocol = { name: string; chain: "base" | "ethereum"; iconUrl: string };
+
+const SUPPORTED_PROTOCOLS: Protocol[] = [
+  { name: "Aerodrome",   chain: "base",     iconUrl: "https://icons.llama.fi/aerodrome.png" },
+  { name: "Uniswap",    chain: "base",     iconUrl: "https://assets.coingecko.com/coins/images/12504/small/uniswap-uni.png" },
+  { name: "Curve",      chain: "base",     iconUrl: "https://icons.llama.fi/curve.png" },
+  { name: "Equalizer",  chain: "base",     iconUrl: "https://icons.llama.fi/equalizer.png" },
+  { name: "Velodrome",  chain: "ethereum", iconUrl: "https://icons.llama.fi/velodrome.png" },
+  { name: "Balancer",   chain: "ethereum", iconUrl: "https://icons.llama.fi/balancer.png" },
+  { name: "SushiSwap",  chain: "ethereum", iconUrl: "https://icons.llama.fi/sushiswap.png" },
+  { name: "PancakeSwap", chain: "ethereum", iconUrl: "https://assets.coingecko.com/coins/images/12632/small/pancakeswap-cake-logo_%281%29.png" },
+];
+
+// ─── Recent searches (localStorage) ──────────────────────────────────────────
+
+type RecentSearch = { input: string; chain: "base" | "ethereum"; ts: number };
+const RECENT_KEY = "iceberg_recent_searches";
+const MAX_RECENT = 5;
+
+function loadRecent(): RecentSearch[] {
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+  } catch { return []; }
+}
+
+export function saveRecentSearch(input: string, chain: "base" | "ethereum") {
+  try {
+    const existing = loadRecent().filter((r) => r.input !== input);
+    const updated: RecentSearch[] = [{ input, chain, ts: Date.now() }, ...existing].slice(0, MAX_RECENT);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(updated));
+  } catch { /* ignore */ }
+}
 
 function FeatureIcon({ children }: { children: React.ReactNode }) {
   return (
@@ -37,7 +72,7 @@ const FEATURES = [
     ),
   },
   {
-    label: "Who controls the protocol",
+    label: "Admin & oracle risks",
     icon: (
       <FeatureIcon>
         <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
@@ -46,7 +81,7 @@ const FEATURES = [
     ),
   },
   {
-    label: "Frontend & phishing analysis",
+    label: "Frontend & phishing checks",
     icon: (
       <FeatureIcon>
         <circle cx="12" cy="12" r="10" />
@@ -56,7 +91,7 @@ const FEATURES = [
     ),
   },
   {
-    label: "Price change exposure",
+    label: "IL & market exposure",
     icon: (
       <FeatureIcon>
         <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" />
@@ -75,6 +110,29 @@ const FEATURES = [
   },
 ];
 
+function ProtocolChip({ protocol }: { protocol: Protocol }) {
+  const [imgOk, setImgOk] = useState(true);
+  return (
+    <div className="group relative flex items-center justify-center rounded-xl border border-slate-200 bg-white p-2 shadow-sm hover:border-slate-300 transition-colors" title={protocol.name}>
+      {imgOk ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={protocol.iconUrl}
+          alt={protocol.name}
+          width={32}
+          height={32}
+          className="rounded-full object-cover"
+          onError={() => setImgOk(false)}
+        />
+      ) : (
+        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-xs font-bold text-slate-500">
+          {protocol.name.charAt(0)}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ChainDot({ chain }: { chain: string }) {
   const bg = chain === "base" ? "bg-blue-600" : "bg-indigo-500";
   const label = chain === "base" ? "B" : "E";
@@ -88,12 +146,20 @@ function ChainDot({ chain }: { chain: string }) {
 export default function LandingPage() {
   const [chain, setChain] = useState<"base" | "ethereum">("base");
   const [tx, setTx] = useState("");
+  const [recents, setRecents] = useState<RecentSearch[]>([]);
   const router = useRouter();
+
+  useEffect(() => { setRecents(loadRecent()); }, []);
 
   function handleAnalyze() {
     const hash = tx.trim();
     if (!hash) return;
-    router.push(`/risk-tool?tx=${encodeURIComponent(hash)}&chain=${chain}`);
+    saveRecentSearch(hash, chain);
+    router.push(`/risk-tool?input=${encodeURIComponent(hash)}&chain=${chain}`);
+  }
+
+  function handleRecent(r: RecentSearch) {
+    router.push(`/risk-tool?input=${encodeURIComponent(r.input)}&chain=${r.chain}`);
   }
 
   return (
@@ -135,11 +201,12 @@ export default function LandingPage() {
           The risk beneath your yield.
         </h1>
         <p className="mt-4 max-w-lg text-lg text-slate-500">
-          Paste a transaction hash. Get a structured breakdown of smart contract risk, protocol controls, and yield exposure in seconds.
+          Paste a transaction hash or pool address.<br />
+          Get a structured, plain-English risk report in seconds.
         </p>
 
         {/* Search bar */}
-        <div className="mt-8 w-full max-w-2xl">
+        <div className="mt-8 w-full max-w-2xl px-2 sm:px-0">
           <div className="flex items-center gap-2 rounded-2xl bg-white px-3 py-2.5 shadow-md">
             <div className="flex shrink-0 items-center gap-1.5 border-r border-slate-200 pr-3">
               <ChainDot chain={chain} />
@@ -157,7 +224,7 @@ export default function LandingPage() {
               value={tx}
               onChange={(e) => setTx(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleAnalyze()}
-              placeholder="Paste a transaction hash (0x...)"
+              placeholder="Paste a transaction hash or pool address…"
               className="min-w-0 flex-1 bg-transparent px-2 py-1 text-sm text-slate-700 placeholder-slate-400 outline-none"
             />
             <button
@@ -170,7 +237,7 @@ export default function LandingPage() {
         </div>
 
         <Link
-          href={`/risk-tool?tx=${SAMPLE_TX}&chain=${SAMPLE_CHAIN}`}
+          href={`/risk-tool?input=${SAMPLE_TX}&chain=${SAMPLE_CHAIN}`}
           className="mt-4 flex items-center gap-1 text-sm font-medium text-blue-600 hover:text-blue-700"
         >
           See a sample analysis
@@ -179,32 +246,65 @@ export default function LandingPage() {
           </svg>
         </Link>
 
+        {/* Recent searches */}
+        {recents.length > 0 && (
+          <div className="mt-4 w-full max-w-2xl">
+            <p className="mb-1.5 text-xs text-slate-400 text-left">Recent</p>
+            <div className="flex flex-col gap-1">
+              {recents.map((r) => (
+                <button
+                  key={r.input}
+                  onClick={() => handleRecent(r)}
+                  className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-left hover:bg-slate-50 transition-colors"
+                >
+                  <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white ${r.chain === "base" ? "bg-blue-600" : "bg-indigo-500"}`}>
+                    {r.chain === "base" ? "B" : "E"}
+                  </span>
+                  <span className="font-mono text-xs text-slate-600 truncate">
+                    {r.input.length > 20 ? `${r.input.slice(0, 10)}…${r.input.slice(-8)}` : r.input}
+                  </span>
+                  <span className="ml-auto text-[10px] text-slate-400">
+                    {new Date(r.ts).toLocaleDateString("en-GB", { month: "short", day: "numeric" })}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Feature strip */}
         <div className="mt-14 w-full max-w-3xl">
-          <div className="grid grid-cols-5 divide-x divide-slate-200 rounded-2xl border border-slate-200 bg-white">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 divide-y sm:divide-y-0 divide-x-0 sm:divide-x divide-slate-200 rounded-2xl border border-slate-200 bg-white">
             {FEATURES.map((f, i) => (
-              <div key={i} className="flex flex-col items-center gap-2.5 px-4 py-5 text-center">
+              <div key={i} className={`flex flex-col items-center gap-2.5 px-4 py-5 text-center border-b border-slate-200 sm:border-b-0 ${i % 2 === 1 ? "border-l border-slate-200" : ""} ${i >= 4 ? "border-b-0" : ""}`}>
                 <span className="text-slate-400">{f.icon}</span>
                 <span className="text-xs leading-snug text-slate-600">{f.label}</span>
               </div>
             ))}
           </div>
         </div>
+
+        {/* Supported protocols grid */}
+        <div className="mt-14 w-full max-w-3xl">
+          <p className="mb-4 text-center text-xs font-semibold uppercase tracking-widest text-slate-400">
+            Analyzes positions from
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            {SUPPORTED_PROTOCOLS.map((p, i) => (
+              <ProtocolChip key={i} protocol={p} />
+            ))}
+          </div>
+          <p className="mt-4 text-center text-[11px] text-slate-400">
+            Base &amp; Ethereum supported. More chains coming soon.
+          </p>
+        </div>
       </main>
 
       {/* ── Footer ── */}
-      <footer className="flex items-center justify-between border-t border-slate-200 px-8 py-4 text-xs text-slate-500">
-        <div className="flex items-center gap-3">
-          <span>Not financial advice</span>
-          <span className="text-slate-300">•</span>
-          <span>Verify findings independently</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <svg viewBox="0 0 20 20" width="14" height="14" fill="currentColor" aria-hidden>
-            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM4.332 8.027a6.012 6.012 0 011.912-2.706C6.512 5.73 6.974 6 7.5 6A1.5 1.5 0 019 7.5V8a2 2 0 004 0 2 2 0 011.523-1.943A5.977 5.977 0 0116 10c0 .34-.028.675-.083 1H15a2 2 0 00-2 2v2.197A5.973 5.973 0 0110 16v-2a2 2 0 00-2-2 2 2 0 01-2-2 2 2 0 00-1.668-1.973z" clipRule="evenodd" />
-          </svg>
-          <span>Supporting: Base, Ethereum (more coming soon)</span>
-        </div>
+      <footer className="flex items-center justify-center gap-3 border-t border-slate-200 px-8 py-4 text-xs text-slate-500">
+        <span>Not financial advice</span>
+        <span className="text-slate-300">•</span>
+        <span>Verify findings independently</span>
       </footer>
     </div>
   );
