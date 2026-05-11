@@ -4,7 +4,7 @@
 
 Iceberg is a free, open-source due diligence tool for DeFi users. Paste a transaction hash or pool address and get a structured, plain-English risk report covering smart contract security, protocol governance, and yield exposure in seconds.
 
-**Live:** [iceberg.finance](https://iceberg.finance) &nbsp;·&nbsp; Built by [@CatDad0x](https://x.com/CatDad0x)
+Built by [@CatDad0x](https://x.com/CatDad0x)
 
 ![Iceberg Landing Page](./public/screenshots/landing.png)
 
