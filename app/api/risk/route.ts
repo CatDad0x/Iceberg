@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ethers } from "ethers";
 import Anthropic from "@anthropic-ai/sdk";
+
+// Vercel function timeout — Hobby plan max is 60s, Pro plan max is 300s.
+// The AI analysis pass alone takes 30-60s on complex positions.
+// If you're on Vercel Pro, raise this to 300.
+export const maxDuration = 60;
+
+// Pin to US East so Anthropic API round-trips are fast.
+// Without this Vercel routes to the nearest region (e.g. Sydney) which adds ~250ms per AI call.
+export const preferredRegion = "iad1";
 import {
   AssetType,
   Chain,
@@ -17,10 +26,87 @@ import {
 import { findProtocolFlow } from "../../lib/protocol-flows";
 import { buildCacheKey, getCached, putCached } from "../../lib/learned-cache";
 
-const RPCS: Record<Chain, string> = {
-  ethereum: process.env.ETHEREUM_RPC_URL ?? "https://eth.llamarpc.com",
-  base: process.env.BASE_RPC_URL ?? "https://base.llamarpc.com",
+// Ordered fallback lists — first entry is highest priority.
+// If env vars are set they jump to the front; public fallbacks follow.
+const RPC_LISTS: Record<Chain, string[]> = {
+  ethereum: [
+    ...(process.env.ETHEREUM_RPC_URL ? [process.env.ETHEREUM_RPC_URL] : []),
+    "https://ethereum-rpc.publicnode.com",
+    "https://eth.meowrpc.com",
+    "https://eth.lava.build",
+    "https://eth.llamarpc.com", // kept as last-resort fallback
+  ],
+  base: [
+    ...(process.env.BASE_RPC_URL ? [process.env.BASE_RPC_URL] : []),
+    "https://base-rpc.publicnode.com",
+    "https://base.meowrpc.com",
+    "https://base.lava.build",
+    "https://base-public.nodies.app",
+    "https://base.llamarpc.com", // kept as last-resort fallback
+  ],
 };
+
+const CHAIN_NETWORKS: Record<Chain, { chainId: number; name: string }> = {
+  ethereum: { chainId: 1, name: "mainnet" },
+  base: { chainId: 8453, name: "base" },
+};
+
+/** Build a JsonRpcProvider with a hard 8s timeout on every RPC call.
+ *  Uses ethers FetchRequest so the timeout applies to all underlying fetches. */
+function makeRpcProvider(url: string, chain: Chain): ethers.JsonRpcProvider {
+  const net = CHAIN_NETWORKS[chain];
+  const req = new ethers.FetchRequest(url);
+  req.timeout = 8000;
+  return new ethers.JsonRpcProvider(req, net, { staticNetwork: ethers.Network.from(net) });
+}
+
+/** Single provider for the main analysis — uses env var or first public RPC. */
+function getProvider(chain: Chain): ethers.JsonRpcProvider {
+  return makeRpcProvider(RPC_LISTS[chain][0], chain);
+}
+
+/** Raw JSON-RPC call with a hard AbortSignal timeout — bypasses ethers internals. */
+async function rpcCall(url: string, method: string, params: unknown[], timeoutMs = 6000): Promise<unknown> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const json = await res.json();
+  return json.result ?? null;
+}
+
+// Raw RPC shapes — only the fields we actually use downstream.
+type RawTx = { to: string | null; input: string; hash: string };
+type RawLog = { address: string; topics: string[]; data: string };
+type RawReceipt = { logs: RawLog[] };
+
+/**
+ * Fetch a transaction + receipt using raw fetch only (no ethers re-fetch).
+ * Downstream code only reads: tx.data, tx.to, receipt.logs[].{address,topics,data}.
+ * We map `input` → `data` so the rest of the route doesn't need changes.
+ * Tries each RPC sequentially with a 6s hard timeout per attempt.
+ */
+async function getTransactionWithFallback(txHash: string, chain: Chain) {
+  for (const url of RPC_LISTS[chain]) {
+    try {
+      const [rawTx, rawReceipt] = await Promise.all([
+        rpcCall(url, "eth_getTransactionByHash", [txHash]) as Promise<RawTx | null>,
+        rpcCall(url, "eth_getTransactionReceipt", [txHash]) as Promise<RawReceipt | null>,
+      ]);
+      if (rawTx && rawReceipt) {
+        // Map raw RPC field `input` → `data` so downstream code is unchanged.
+        const tx = { ...rawTx, data: rawTx.input } as unknown as ethers.TransactionResponse;
+        const receipt = rawReceipt as unknown as ethers.TransactionReceipt;
+        return { tx, receipt };
+      }
+    } catch {
+      // try next RPC
+    }
+  }
+  return { tx: null, receipt: null };
+}
 
 // Etherscan V2 unified API — single endpoint, chainid selects the network
 const ETHERSCAN_V2_API = "https://api.etherscan.io/v2/api";
@@ -100,7 +186,7 @@ type AssetRisk = {
 async function getABI(address: string, chain: Chain): Promise<string | null> {
   const url = etherscanUrl(chain, { module: "contract", action: "getabi", address });
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
     const json = await res.json();
     if (json.status === "1") return json.result;
     return null;
@@ -112,7 +198,7 @@ async function getABI(address: string, chain: Chain): Promise<string | null> {
 async function getContractSource(address: string, chain: Chain): Promise<string | null> {
   const url = etherscanUrl(chain, { module: "contract", action: "getsourcecode", address });
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
     const json = await res.json();
     if (json.status === "1" && json.result[0]?.SourceCode) {
       return json.result[0].SourceCode.slice(0, 8000);
@@ -365,7 +451,7 @@ async function getPoolReserves(
   poolAddress: string,
   pair: { token0: string; token1: string; token0Symbol: string; token1Symbol: string },
   chain: Chain,
-  _provider: ethers.JsonRpcProvider,
+  _provider: ethers.AbstractProvider,
   protocol?: string,
 ): Promise<ContractRisk["poolReserves"]> {
   // Fetch token prices in parallel with reserves (DeFiLlama — free, no key)
@@ -382,7 +468,7 @@ async function getPoolReserves(
     rawR1 = subgraphRaw.r1;
   } else {
     // Fall back to RPC balanceOf calls
-    const freshProvider = new ethers.JsonRpcProvider(RPCS[chain]);
+    const freshProvider = getProvider(chain);
     const erc20Abi = ["function balanceOf(address) view returns (uint256)", "function decimals() view returns (uint8)"];
 
     const fetchBalance = async (tokenAddr: string): Promise<{ balance: bigint; decimals: number } | null> => {
@@ -430,7 +516,7 @@ async function getPoolReserves(
 
 async function detectProxy(
   address: string,
-  provider: ethers.JsonRpcProvider
+  provider: ethers.AbstractProvider
 ): Promise<{ isProxy: boolean; implementation?: string; admin?: string }> {
   try {
     const implSlot = await provider.getStorage(address, PROXY_SLOTS.implementation);
@@ -454,7 +540,7 @@ async function detectProxy(
 async function readContractState(
   address: string,
   abi: string,
-  provider: ethers.JsonRpcProvider,
+  provider: ethers.AbstractProvider,
   poolType: PoolType
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
@@ -550,7 +636,7 @@ const GNOSIS_SAFE_ABI = [
 
 async function getMultisigInfo(
   address: string,
-  provider: ethers.JsonRpcProvider,
+  provider: ethers.AbstractProvider,
 ): Promise<{ signers: number; threshold: number } | null> {
   try {
     const safe = new ethers.Contract(address, GNOSIS_SAFE_ABI, provider);
@@ -587,7 +673,7 @@ const UNIVERSAL_ADMIN_ABI = [
 
 async function runUniversalAdminChecks(
   address: string,
-  provider: ethers.JsonRpcProvider,
+  provider: ethers.AbstractProvider,
   chain: Chain
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
@@ -697,7 +783,7 @@ const POOL_AUTODETECT_ABI = [
 async function resolveTokenSymbol(
   address: string,
   chain: Chain,
-  provider: ethers.JsonRpcProvider
+  provider: ethers.AbstractProvider
 ): Promise<string> {
   const known = findKnownAsset(address, chain);
   if (known) return known.symbol;
@@ -721,7 +807,7 @@ function describeTickSpacing(ts: number): string {
 
 async function autoDetectPoolType(
   address: string,
-  provider: ethers.JsonRpcProvider,
+  provider: ethers.AbstractProvider,
   chain: Chain
 ): Promise<{
   poolType: PoolType;
@@ -862,6 +948,7 @@ async function runAIAnalysis(context: {
   assets: AssetRisk[];
   sourceSnippets: Record<string, string>;
   nftPriceRange?: { lower: number; upper: number; token0Symbol?: string; token1Symbol?: string };
+  customAbis?: Array<{ address: string; abi: string }>;
 }): Promise<{
   narrative: string;
   overallRisk: RiskLevel;
@@ -916,14 +1003,7 @@ async function runAIAnalysis(context: {
 
   const explorerBase = context.chain === "base" ? "https://basescan.org" : "https://etherscan.io";
 
-  const prompt = `You are a DeFi security analyst. A user deposited into a yield farming position. You have web_search and web_fetch tools. USE THEM to research before writing the report.
-
-RESEARCH PROTOCOL (do this BEFORE writing the final report):
-1. For EVERY contract address in the data below, fetch its ${explorerBase}/address/<addr> page to confirm what it actually is (protocol name, contract role, verified status).
-2. For any contract you don't recognise after step 1, web_search for the address. look for the protocol name, audits, exploit history.
-3. For unknown tokens (symbol shown as "Unverified" or unfamiliar), search "<symbol> token <chain>" + check DefiLlama / CoinGecko to confirm legitimacy.
-4. For the overall protocol identified (e.g. Aerodrome, Uniswap v3, Curve), search for "<protocol> exploit", "<protocol> audit", recent news in the last 12 months.
-5. Cite the URLs you actually used in the "sources" array of your final JSON.
+  const prompt = `You are a DeFi security analyst. A user deposited into a yield farming position. Analyse the on-chain data below using your training knowledge of DeFi protocols, audits, and exploit history.
 
 CRITICAL RULES:
 - Do NOT call canonical tokens (USDC, WETH, DAI, USDT, cbETH, wstETH) "fake" or "shadow". they are real tokens. Verify via Basescan/Etherscan if uncertain.
@@ -947,7 +1027,7 @@ ${JSON.stringify(context.assets, null, 2)}
 SOURCE CODE WAS FETCHED FOR: ${Object.keys(context.sourceSnippets).join(", ") || "no contracts"}
 ${Object.entries(context.sourceSnippets).map(([addr, src]) => `\n--- ${addr} ---\n${src.slice(0, 1200)}`).join("\n")}
 
-After research, your final response must be ONLY a JSON object (no prose around it) in this exact schema. Do NOT copy or reuse the placeholder text below — every field must come from your actual research on this specific transaction.
+Your final response must be ONLY a JSON object (no prose around it) in this exact schema. Do NOT copy or reuse the placeholder text below — every field must come from your analysis of this specific transaction.
 
 {
   "vulnerabilityChecks": [
@@ -958,7 +1038,7 @@ After research, your final response must be ONLY a JSON object (no prose around 
       "finding": "One scannable line under 100 chars — what you found",
       "info": "2-4 sentences: what you found AND why a yield farmer should care",
       "laymanTerms": "1-2 sentences in zero-jargon plain English, analogy from everyday life where helpful",
-      "learnMoreUrl": "URL you actually fetched or a stable well-known reference"
+      "learnMoreUrl": "A stable well-known reference URL (Etherscan/Basescan address page, protocol docs, audit report, Immunefi, rekt.news, DeFiLlama)"
     }
   ],
   "narrative": "3-6 sentence plain-English risk summary based on your research",
@@ -998,6 +1078,36 @@ After research, your final response must be ONLY a JSON object (no prose around 
   ]
 }
 
+${(context.customAbis ?? []).length > 0 ? `
+USER-PROVIDED CONTRACT ABIs — ANALYSE THESE CAREFULLY:
+The user manually pasted the following ABIs because these tokens/contracts have non-standard or unusual function names that automated tools cannot handle. This is a red flag in itself — ordinary well-audited tokens do not need this.
+
+${(context.customAbis ?? []).map((ca) => {
+  // Parse and summarise the ABI — extract function names + state mutability
+  let parsed: Array<{ type: string; name?: string; stateMutability?: string; inputs?: Array<{ type: string; name: string }> }> = [];
+  try { parsed = JSON.parse(ca.abi); } catch { /* raw string */ }
+  const functions = parsed.filter(x => x.type === "function").map(x =>
+    `${x.name}(${(x.inputs ?? []).map(i => i.type).join(",")}) [${x.stateMutability ?? "nonpayable"}]`
+  );
+  return `Contract ${ca.address}:
+Functions: ${functions.length > 0 ? functions.join(", ") : "(could not parse — raw ABI provided below)"}
+${functions.length === 0 ? ca.abi.slice(0, 2000) : ""}`;
+}).join("\n\n")}
+
+For EACH user-provided ABI above, you MUST add a dedicated vulnerability check to vulnerabilityChecks:
+- category: "Protocol Security"
+- title: "Custom ABI Analysis: <short address e.g. 0x1234…abcd>"
+- Analyze for:
+  1. Tax/fee-on-transfer: look for functions that intercept or tax transfers (e.g. _transfer overrides, fee variables, excludeFromFee, setTaxFee)
+  2. Owner drain/rug: functions like withdrawAll, drain, sweep, rescueTokens, or anything that moves user funds to an owner address
+  3. Hidden mint: mint() or similar functions callable by a single owner without a cap
+  4. Blacklist/freeze: blacklist, ban, addToBlacklist, lockAccount, freeze — can block a specific user from selling
+  5. Honeypot patterns: functions that make buying possible but block selling (setMaxSellAmount(0), trading booleans, restricted _transfer)
+  6. Non-standard names masking standard calls: e.g. "airdrop" that actually mints, or "distribute" that drains a balance
+- severity: "critical" if honeypot/rug drain present, "high" if mint/blacklist without timelock, "medium" if suspicious owner controls, "low" if non-standard but benign
+- finding: summarise the most important finding in one line
+- laymanTerms: explain in plain English with a real-world analogy (e.g. "Think of this like a vending machine that lets you put money in but jams when you try to get change back.")
+` : ""}
 MANDATORY CHECKLIST. Every item below MUST produce at least one entry in vulnerabilityChecks — even if the result is clean. A clean finding is severity "low". Context-only is severity "info". Do NOT skip any item. The user sees what was checked: a green "low concern" row is just as important to them as a red "critical" row. An empty or short vulnerabilityChecks array is a FAILURE of this task.
 
 A) Protocol Security — produce ONE check per bullet:
@@ -1058,47 +1168,20 @@ Rules:
 - "finding" = one short scannable line (under 100 chars). For clean findings, start with the positive result: "Source code verified on Basescan", "No known exploits found", "Uniswap DAO governs via timelock".
 - "info" field = 2-4 sentences in plain English: what you found AND why a yield farmer should care.
 - "laymanTerms" = REQUIRED on every check. 1-2 sentences using zero jargon. Write as if explaining to a smart friend who has never used DeFi. Use an analogy from everyday life where it helps. Never use words like "protocol", "multisig", "proxy", "mempool", "oracle", "EOA", "timelock" — translate them into plain concepts instead.
-- "learnMoreUrl" = a real authoritative URL you actually found via web_search/web_fetch, OR a stable well-known reference (Etherscan/Basescan address page, protocol docs root, audit report repo, Immunefi page, rekt.news, DefiLlama). Do NOT invent URLs.
-- "sources" = array of { "title", "url" } objects. "title" must be the actual page title or a descriptive sentence (not the raw URL). Only include sources you actually fetched or searched. Do not fabricate.`;
-
-  const tools = [
-    { type: "web_search_20250305", name: "web_search", max_uses: 4 },
-    { type: "web_fetch_20250910", name: "web_fetch", max_uses: 4 },
-  ];
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const messages: any[] = [{ role: "user", content: prompt }];
+- "learnMoreUrl" = a stable well-known reference URL (Etherscan/Basescan address page, protocol docs, audit report repo, Immunefi page, rekt.news, DeFiLlama). Do NOT invent URLs.
+- "sources" = array of { "title", "url" } objects for any authoritative references you used (protocol docs, audit reports, DeFiLlama, etc). Do not fabricate URLs.`;
 
   let finalText = "";
-  const MAX_ITER = 8;
 
   try {
-    for (let i = 0; i < MAX_ITER; i++) {
-      const response = await client.beta.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 8000,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        tools: tools as any,
-        messages,
-        betas: ["web-fetch-2025-09-10"],
-      });
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 4000,
+      messages: [{ role: "user", content: prompt }],
+    });
 
-      // Pull any text out of this turn
-      for (const block of response.content) {
-        if (block.type === "text") finalText += block.text;
-      }
-
-      // Only `pause_turn` means "keep going. re-send the assistant turn so
-      // server tools can continue". Every other stop_reason (end_turn,
-      // stop_sequence, max_tokens, refusal, tool_use, etc.) is terminal —
-      // pushing assistant content and re-calling would be treated as a
-      // prefill, which Opus 4.7 rejects.
-      if (response.stop_reason === "pause_turn") {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        messages.push({ role: "assistant", content: response.content as any });
-        continue;
-      }
-      break;
+    for (const block of response.content) {
+      if (block.type === "text") finalText += block.text;
     }
   } catch (err) {
     console.error("AI research loop error:", err);
@@ -1216,7 +1299,7 @@ const RISKY_FUNCTIONS = [
 async function investigateUnknownToken(
   tokenAddr: string,
   chain: Chain,
-  provider: ethers.JsonRpcProvider
+  provider: ethers.AbstractProvider
 ): Promise<AssetRisk> {
   const findings: string[] = [];
   let symbol = "?";
@@ -1309,7 +1392,7 @@ async function investigateUnknownToken(
 
 // ─── Address-based analysis (pool / gauge address entered directly) ───────────
 
-async function analyzeContractAddress(address: string, chain: Chain, provider: ethers.JsonRpcProvider) {
+async function analyzeContractAddress(address: string, chain: Chain, provider: ethers.AbstractProvider, customAbis: Array<{ address: string; abi: string }> = []) {
   const explorerBase = chain === "base" ? "https://basescan.org" : "https://etherscan.io";
 
   // Reject wallet addresses immediately
@@ -1465,7 +1548,7 @@ async function analyzeContractAddress(address: string, chain: Chain, provider: e
   const [aiResult, activeProposals, llamaExploits] = await Promise.all([
     cached
       ? Promise.resolve(cached.result)
-      : runAIAnalysis({ txHash: address, chain, contracts: contractRisks, assets: assetRisks, sourceSnippets }),
+      : runAIAnalysis({ txHash: address, chain, contracts: contractRisks, assets: assetRisks, sourceSnippets, customAbis }),
     getActiveProposals(detectedProtocol),
     getProtocolExploits(detectedProtocol ?? ""),
   ]);
@@ -1649,9 +1732,12 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number } {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json() as { txHash?: string; input?: string; chain: Chain };
+    const body = await req.json() as { txHash?: string; input?: string; chain: Chain; customAbis?: Array<{ address: string; abi: string }> };
     const rawInput = (body.txHash ?? body.input ?? "").trim();
     const chain = body.chain;
+    const customAbis: Array<{ address: string; abi: string }> = (body.customAbis ?? [])
+      .filter(ca => ca.address?.startsWith("0x") && ca.abi?.trim().length > 0)
+      .slice(0, 5); // cap at 5 to limit prompt size
 
     const isAddress = /^0x[0-9a-fA-F]{40}$/.test(rawInput);
     const isTxHash  = /^0x[0-9a-fA-F]{64}$/.test(rawInput);
@@ -1677,19 +1763,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const provider = new ethers.JsonRpcProvider(RPCS[chain]);
+    const provider = getProvider(chain);
 
     // Address mode: analyse the contract directly (pool, gauge, etc.)
-    if (isAddress) return await analyzeContractAddress(rawInput, chain, provider);
+    if (isAddress) return await analyzeContractAddress(rawInput, chain, provider, customAbis);
 
     // Transaction hash mode: existing flow
     const txHash = rawInput;
 
-    // 1. Fetch the transaction receipt
-    const [tx, receipt] = await Promise.all([
-      provider.getTransaction(txHash),
-      provider.getTransactionReceipt(txHash),
-    ]);
+    // 1. Fetch the transaction + receipt — use sequential RPC fallback so a
+    //    fast-but-stale node returning null doesn't kill the request.
+    const { tx, receipt } = await getTransactionWithFallback(txHash, chain);
 
     if (!tx || !receipt) {
       return NextResponse.json({ error: "Transaction not found. Check the hash and chain." }, { status: 404 });
@@ -1864,9 +1948,15 @@ export async function POST(req: NextRequest) {
       fullPairInfo?: { token0: string; token1: string; token0Symbol: string; token1Symbol: string };
       isVerified: boolean;
     };
-    const workItems: WorkItem[] = [];
+    // Run per-contract analysis in parallel — each contract is independent.
+    // Each item also returns any shared-state values it detected so we can merge below.
+    type WorkResult = WorkItem & {
+      _detectedProtocol?: string;
+      _detectedPair?: { token0Symbol: string; token1Symbol: string };
+      _detectedFeePercent?: number;
+    };
 
-    for (const address of contractAddresses) {
+    const workResults: WorkResult[] = await Promise.all(contractAddresses.map(async (address): Promise<WorkResult> => {
       const abi = abiMap.get(address) ?? null;
 
       const proxyInfo = await detectProxy(address, provider);
@@ -2012,7 +2102,7 @@ export async function POST(req: NextRequest) {
         ?? autoLabel
         ?? `Unknown contract ${address.slice(0, 8)}...`;
 
-      workItems.push({
+      return {
         address,
         label,
         poolType,
@@ -2023,13 +2113,21 @@ export async function POST(req: NextRequest) {
         directAbi: abi,
         implAddrForAbi,
         fullPairInfo,
-        // Known protocol contracts and known factory pools are always considered verified
-        // (they're in our trusted registry). For everything else, use ABI or autoLabel presence.
-        // autoLabel being set means we extracted useful identity (pair tokens, known-protocol
-        // fallback, etc.) — verified even if factory() RPC failed due to rate-limiting.
         isVerified: !!protocolContract || !!factory || abi !== null || poolType !== "unknown" || autoLabel !== undefined,
-      });
-    }
+        _detectedProtocol: protocolContract?.protocol ?? factory?.name?.replace(/ \(.+\)$/, "") ?? autoLabel?.replace(/ pool$/, "") ?? undefined,
+        _detectedPair: fullPairInfo ? { token0Symbol: fullPairInfo.token0Symbol, token1Symbol: fullPairInfo.token1Symbol } : undefined,
+        _detectedFeePercent: detectedFeePercent,
+      };
+    }));
+
+    // Merge shared state from parallel results
+    const workItems: WorkItem[] = workResults.map((r) => {
+      const { _detectedProtocol, _detectedPair, _detectedFeePercent, ...item } = r;
+      if (_detectedProtocol) detectedProtocol = detectedProtocol ?? _detectedProtocol;
+      if (_detectedPair) detectedPair = detectedPair ?? _detectedPair;
+      if (_detectedFeePercent !== undefined) detectedFeePercent = detectedFeePercent ?? _detectedFeePercent;
+      return item;
+    });
 
     // ── Round 3: parallel Etherscan post-fetch (meta + reserves + impl ABIs) ──
     // Brief pause to let the public RPC recover from the Round 2 call flood before
@@ -2152,7 +2250,7 @@ export async function POST(req: NextRequest) {
     const [aiResult, activeProposals, llamaExploits] = await Promise.all([
       cached
         ? Promise.resolve(cached.result)
-        : runAIAnalysis({ txHash, chain, contracts: contractRisks, assets: assetRisks, sourceSnippets, nftPriceRange }),
+        : runAIAnalysis({ txHash, chain, contracts: contractRisks, assets: assetRisks, sourceSnippets, nftPriceRange, customAbis }),
       getActiveProposals(detectedProtocol),
       getProtocolExploits(detectedProtocol ?? ""),
     ]);
