@@ -44,8 +44,8 @@ export const PROTOCOL_FLOWS: ProtocolFlow[] = [
     flowName: "Uniswap v4 flow",
     steps: [
       { step: 1, title: "Hold pair tokens", icon: "✓", status: "done", detail: "Both tokens in your wallet before adding liquidity" },
-      { step: 2, title: "Choose price range", icon: "📍", status: "current", detail: "Concentrated liquidity: you set a lower and upper tick price boundary" },
-      { step: 3, title: "Add liquidity", icon: "✓", status: "done", detail: "LP NFT minted by the v4 PositionManager — your position ID is the NFT token ID" },
+      { step: 2, title: "Choose price range", icon: "✓", status: "done", detail: "Concentrated liquidity: you set a lower and upper tick price boundary" },
+      { step: 3, title: "Add liquidity", icon: "📍", status: "current", detail: "LP NFT minted by the v4 PositionManager — your position ID is the NFT token ID" },
       { step: 4, title: "Earn swap fees", icon: "💰", status: "recurring", detail: "Fees accumulate automatically while the price stays inside your range" },
       { step: 5, title: "Collect or exit", icon: "🏁", status: "optional", detail: "Call collect() to take fees at any time, or burn the NFT to withdraw liquidity" },
     ],
