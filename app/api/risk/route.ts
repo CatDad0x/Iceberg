@@ -65,6 +65,19 @@ function getProvider(chain: Chain): ethers.JsonRpcProvider {
   return makeRpcProvider(RPC_LISTS[chain][0], chain);
 }
 
+/**
+ * Hard timeout wrapper for any ethers contract call.
+ * ethers FetchRequest.timeout does NOT reliably abort in Vercel's runtime,
+ * so we race every contract call against a Promise that rejects after `ms`.
+ * Usage: await ct(contract.method()).catch(() => null)
+ */
+function ct<T>(p: Promise<T>, ms = 4000): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error("rpc-timeout")), ms)),
+  ]);
+}
+
 /** Raw JSON-RPC call with a hard AbortSignal timeout — bypasses ethers internals. */
 async function rpcCall(url: string, method: string, params: unknown[], timeoutMs = 6000): Promise<unknown> {
   const res = await fetch(url, {
@@ -739,7 +752,7 @@ async function runUniversalAdminChecks(
 
   // Pending ownership transfer
   try {
-    const pending: string = await contract.pendingOwner();
+    const pending: string = await ct(contract.pendingOwner());
     if (pending && pending !== ethers.ZeroAddress) {
       findings.push({
         title: "Pending ownership transfer",
@@ -753,7 +766,7 @@ async function runUniversalAdminChecks(
 
   // Paused state
   try {
-    const isPaused: boolean = await contract.paused();
+    const isPaused: boolean = await ct(contract.paused());
     if (isPaused === true) {
       findings.push({
         title: "Contract is currently paused",
@@ -789,7 +802,7 @@ async function resolveTokenSymbol(
   if (known) return known.symbol;
   try {
     const c = new ethers.Contract(address, ["function symbol() view returns (string)"], provider);
-    const sym = await c.symbol();
+    const sym = await ct(c.symbol());
     if (sym && typeof sym === "string") return sym;
   } catch {
     // ignore
@@ -819,37 +832,17 @@ async function autoDetectPoolType(
   const findings: Finding[] = [];
   const contract = new ethers.Contract(address, POOL_AUTODETECT_ABI, provider);
 
-  // Always try to read pool state — even if factory() fails we can still get token0/token1/fee
-  let factoryAddr: string | null = null;
-  try {
-    factoryAddr = await contract.factory();
-  } catch {
-    // factory() not available — retry once after a short pause
-    await new Promise((r) => setTimeout(r, 300));
-    try { factoryAddr = await contract.factory(); } catch { /* not a pool */ }
-  }
+  // Read all pool state in parallel — ct() enforces a 4s hard timeout per call
+  // so a hung RPC never blocks the whole analysis.
+  const [factoryAddr, tickSpacing, fee, token0, token1] = await Promise.all([
+    ct(contract.factory()).catch(() => null),
+    ct(contract.tickSpacing()).catch(() => null),
+    ct(contract.fee()).catch(() => null),
+    ct(contract.token0()).catch(() => null),
+    ct(contract.token1()).catch(() => null),
+  ]);
 
-  const knownFactory = factoryAddr ? findPoolFactory(factoryAddr, chain) : null;
-
-  // Small pause before token reads to let the RPC recover from factory() call
-  await new Promise((r) => setTimeout(r, 150));
-
-  // Read fee/tickSpacing — retry fee() once on failure (public RPCs often rate-limit after factory())
-  const tickSpacing = await contract.tickSpacing().catch(() => null);
-  let fee: bigint | number | null = await contract.fee().catch(() => null);
-  if (fee === null) {
-    await new Promise((r) => setTimeout(r, 400));
-    fee = await contract.fee().catch(() => null);
-  }
-
-  // token0/token1 are critical for pair display — retry with delay on failure
-  const readWithRetry = async (fn: () => Promise<string>): Promise<string | null> => {
-    try { return await fn(); } catch { /* fall through */ }
-    await new Promise((r) => setTimeout(r, 300));
-    try { return await fn(); } catch { return null; }
-  };
-  const token0 = await readWithRetry(() => contract.token0());
-  const token1 = await readWithRetry(() => contract.token1());
+  const knownFactory = factoryAddr ? findPoolFactory(factoryAddr as string, chain) : null;
 
   let pair:
     | { token0Symbol: string; token1Symbol: string; token0: string; token1: string }
@@ -1176,7 +1169,7 @@ Rules:
   try {
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 4000,
+      max_tokens: 2000,
       messages: [{ role: "user", content: prompt }],
     });
 
@@ -1310,10 +1303,10 @@ async function investigateUnknownToken(
   const contract = new ethers.Contract(tokenAddr, ERC20_BASIC_ABI, provider);
   try {
     const [n, s, d, supply] = await Promise.all([
-      contract.name().catch(() => null),
-      contract.symbol().catch(() => null),
-      contract.decimals().catch(() => null),
-      contract.totalSupply().catch(() => null),
+      ct(contract.name()).catch(() => null),
+      ct(contract.symbol()).catch(() => null),
+      ct(contract.decimals()).catch(() => null),
+      ct(contract.totalSupply()).catch(() => null),
     ]);
     if (n) name = n;
     if (s) symbol = s;
@@ -1327,7 +1320,7 @@ async function investigateUnknownToken(
 
   // 2. Check if owner is set (centralisation)
   try {
-    const owner = await contract.owner();
+    const owner = await ct(contract.owner());
     if (owner && owner !== ethers.ZeroAddress) {
       const code = await provider.getCode(owner).catch(() => "0x");
       const isEOA = code === "0x";
@@ -1454,9 +1447,11 @@ async function analyzeContractAddress(address: string, chain: Chain, provider: e
   } else if (factory && poolType !== "unknown") {
     try {
       const pc = new ethers.Contract(address, POOL_AUTODETECT_ABI, provider);
-      const fee = await pc.fee().catch(() => null);
-      const t0 = await pc.token0().catch(() => null);
-      const t1 = await pc.token1().catch(() => null);
+      const [fee, t0, t1] = await Promise.all([
+        ct(pc.fee()).catch(() => null),
+        ct(pc.token0()).catch(() => null),
+        ct(pc.token1()).catch(() => null),
+      ]);
       if (t0 && t1) {
         const [s0, s1] = await Promise.all([resolveTokenSymbol(t0, chain, provider), resolveTokenSymbol(t1, chain, provider)]);
         fullPairInfo = { token0: t0, token1: t1, token0Symbol: s0, token1Symbol: s1 };
@@ -2011,10 +2006,11 @@ export async function POST(req: NextRequest) {
         // Always populate fullPairInfo (not gated on detectedPair) so each pool gets its own reserves.
         try {
           const pc = new ethers.Contract(address, POOL_AUTODETECT_ABI, provider);
-          const fee = await pc.fee().catch(() => null);
-          // Read token0/token1 sequentially with retry to avoid public RPC rate limits
-          const t0 = await pc.token0().catch(() => null) ?? await pc.token0().catch(() => null);
-          const t1 = await pc.token1().catch(() => null) ?? await pc.token1().catch(() => null);
+          const [fee, t0, t1] = await Promise.all([
+            ct(pc.fee()).catch(() => null),
+            ct(pc.token0()).catch(() => null),
+            ct(pc.token1()).catch(() => null),
+          ]);
           if (t0 && t1) {
             const [s0, s1] = await Promise.all([
               resolveTokenSymbol(t0, chain, provider),
@@ -2130,9 +2126,6 @@ export async function POST(req: NextRequest) {
     });
 
     // ── Round 3: parallel Etherscan post-fetch (meta + reserves + impl ABIs) ──
-    // Brief pause to let the public RPC recover from the Round 2 call flood before
-    // we fire reserve balanceOf calls.
-    await new Promise((r) => setTimeout(r, 600));
     const uniqueImplAddrs = [...new Set(workItems.map((w) => w.implAddrForAbi).filter(Boolean) as string[])];
     const [metaResults, reserveResults, implAbiResults] = await Promise.all([
       Promise.all(workItems.map((w) => getContractMeta(w.address, chain))),
