@@ -121,6 +121,66 @@ async function getTransactionWithFallback(txHash: string, chain: Chain) {
   return { tx: null, receipt: null };
 }
 
+/**
+ * Decode fee and currency pair from a Uniswap V4 PositionManager transaction.
+ *
+ * V4 positions are minted via:
+ *   PositionManager.multicall([modifyLiquidities(unlockData, deadline)])
+ *   unlockData = abi.encode(bytes actions, bytes[] params)
+ *   actions[0] = 0x02 (MINT_POSITION)
+ *   params[0]  = abi.encode(PoolKey, tickLower, tickUpper, liquidity, ...)
+ *   PoolKey    = (currency0, currency1, fee, tickSpacing, hooks)
+ *
+ * Returns { fee (pips → decimal percent), currency0, currency1 } or null.
+ */
+function tryDecodeV4PoolKey(txData: string): {
+  feePercent: number;
+  currency0: string;
+  currency1: string;
+} | null {
+  try {
+    const MULTICALL_SEL = "0xac9650d8";
+    const MODIFY_LIQ_SEL = "0xdd46508f";
+    const MINT_POSITION_ACTION = 0x02;
+    const coder = ethers.AbiCoder.defaultAbiCoder();
+
+    // Unwrap multicall if needed
+    let calldataBody = txData;
+    if (txData.startsWith(MULTICALL_SEL)) {
+      const [calls] = coder.decode(["bytes[]"], "0x" + txData.slice(10));
+      const found = (calls as string[]).find((c: string) => c.startsWith(MODIFY_LIQ_SEL));
+      if (!found) return null;
+      calldataBody = found;
+    }
+
+    if (!calldataBody.startsWith(MODIFY_LIQ_SEL)) return null;
+
+    // decode modifyLiquidities(bytes unlockData, uint256 deadline)
+    const [unlockData] = coder.decode(["bytes", "uint256"], "0x" + calldataBody.slice(10));
+    const [actions, params] = coder.decode(["bytes", "bytes[]"], unlockData as string);
+    const actionsHex = (actions as string).slice(2);
+
+    for (let i = 0; i < actionsHex.length / 2; i++) {
+      const action = parseInt(actionsHex.slice(i * 2, i * 2 + 2), 16);
+      if (action === MINT_POSITION_ACTION) {
+        const [poolKey] = coder.decode(
+          ["(address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)", "int24", "int24", "uint256", "uint128", "uint128", "address", "bytes"],
+          (params as string[])[i]
+        );
+        const key = poolKey as { currency0: string; currency1: string; fee: bigint };
+        return {
+          feePercent: Number(key.fee) / 10000,
+          currency0: key.currency0.toLowerCase(),
+          currency1: key.currency1.toLowerCase(),
+        };
+      }
+    }
+  } catch {
+    // Not a V4 PositionManager multicall or decode failed — skip silently
+  }
+  return null;
+}
+
 // Etherscan V2 unified API — single endpoint, chainid selects the network
 const ETHERSCAN_V2_API = "https://api.etherscan.io/v2/api";
 const CHAIN_IDS: Record<Chain, number> = { ethereum: 1, base: 8453 };
@@ -1818,11 +1878,16 @@ export async function POST(req: NextRequest) {
     }
 
     // 3a. Uniswap V4 special handling:
-    //   - Parse fee from the PoolManager Swap event (no per-pool contract to call fee() on)
-    //   - Detect native ETH as the second asset (tx.value > 0 means ETH is an input token)
+    //   - Decode fee + currencies from PositionManager calldata (no per-pool contract to call)
+    //   - Detect native ETH (currency0 = address(0)) and add WETH as a token so the pair
+    //     shows "WETH / TOKEN" and the ETH asset price is resolved
     const V4_POOL_MANAGER_ADDRESSES: Record<Chain, string> = {
       base: "0x498581ff718922c3f8e6a244956af099b2652b2b",
       ethereum: "0x000000000004444c5dc75cb358380d2e3de08a90",
+    };
+    const V4_POSITION_MANAGER_ADDRESSES: Record<Chain, string> = {
+      base: "0x7c5f5a4bbd8fd63184577525326123b519429bdc",
+      ethereum: "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
     };
     const WETH_ADDRESSES: Record<Chain, string> = {
       base: "0x4200000000000000000000000000000000000006",
@@ -1833,29 +1898,35 @@ export async function POST(req: NextRequest) {
     let v4Fee: number | undefined;
 
     if (isV4Tx) {
-      // V4 Swap event: Swap(bytes32 indexed id, address indexed sender, int128 amount0,
-      //   int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)
-      // fee is the 6th ABI word (uint24, right-padded in 32 bytes) in log.data
-      const V4_SWAP_TOPIC = ethers.id("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
-      for (const log of receipt.logs) {
-        if (log.address.toLowerCase() === v4PoolManager && log.topics[0] === V4_SWAP_TOPIC) {
-          const hex = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
-          if (hex.length >= 384) {
-            // Slot 5 (fee) starts at char 320; uint24 is the last 6 chars of the 64-char slot
-            const feeRaw = parseInt(hex.slice(378, 384), 16);
-            if (!isNaN(feeRaw) && feeRaw > 0) v4Fee = feeRaw / 10000;
-          }
-          break;
+      // Primary: decode fee from PositionManager calldata (works for LP minting)
+      const poolKey = tryDecodeV4PoolKey(tx.data ?? "");
+      if (poolKey) {
+        v4Fee = poolKey.feePercent;
+        // currency0 = address(0) means native ETH — add WETH as its ERC20 proxy for
+        // price resolution and pair display
+        const ETH_ZERO = "0x0000000000000000000000000000000000000000";
+        if (poolKey.currency0 === ETH_ZERO) {
+          tokenAddresses.add(WETH_ADDRESSES[chain].toLowerCase());
+        } else if (poolKey.currency1 === ETH_ZERO) {
+          tokenAddresses.add(WETH_ADDRESSES[chain].toLowerCase());
+        }
+        // Ensure both explicit currencies are in the token set if they're ERC20
+        if (poolKey.currency0 !== ETH_ZERO) tokenAddresses.add(poolKey.currency0);
+        if (poolKey.currency1 !== ETH_ZERO) tokenAddresses.add(poolKey.currency1);
+      } else {
+        // Fallback: if native ETH is an input (tx.value > 0), add WETH to tokenAddresses
+        const rawValue = (tx as unknown as { value?: string }).value;
+        const txValueWei = rawValue ? BigInt(rawValue) : BigInt(0);
+        if (txValueWei > BigInt(0)) {
+          tokenAddresses.add(WETH_ADDRESSES[chain].toLowerCase());
         }
       }
+    }
 
-      // If native ETH is an input (tx.value > 0), add WETH to tokenAddresses so the
-      // pair shows "WETH / TOKEN" instead of just "TOKEN"
-      const rawValue = (tx as unknown as { value?: string }).value;
-      const txValueWei = rawValue ? BigInt(rawValue) : BigInt(0);
-      if (txValueWei > BigInt(0)) {
-        tokenAddresses.add(WETH_ADDRESSES[chain].toLowerCase());
-      }
+    // Also register the V4 PositionManager as a known address if present
+    const v4PM = V4_POSITION_MANAGER_ADDRESSES[chain];
+    if (touchedAddresses.has(v4PM)) {
+      // Already handled via registry — just ensure it's in contractAddresses
     }
 
     // 3b. Read NFT position data (tickLower/tickUpper) for concentrated liquidity positions.
