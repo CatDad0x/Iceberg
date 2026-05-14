@@ -245,32 +245,6 @@ export default function LandingPage() {
           </svg>
         </Link>
 
-        {/* Recent searches */}
-        {recents.length > 0 && (
-          <div className="mt-4 w-full max-w-2xl">
-            <p className="mb-1.5 text-xs text-slate-400 text-left">Recent</p>
-            <div className="flex flex-col gap-1">
-              {recents.map((r) => (
-                <button
-                  key={r.input}
-                  onClick={() => handleRecent(r)}
-                  className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-left hover:bg-slate-50 transition-colors"
-                >
-                  <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white ${r.chain === "base" ? "bg-blue-600" : "bg-indigo-500"}`}>
-                    {r.chain === "base" ? "B" : "E"}
-                  </span>
-                  <span className="font-mono text-xs text-slate-600 truncate">
-                    {r.input.length > 20 ? `${r.input.slice(0, 10)}…${r.input.slice(-8)}` : r.input}
-                  </span>
-                  <span className="ml-auto text-[10px] text-slate-400">
-                    {new Date(r.ts).toLocaleDateString("en-GB", { month: "short", day: "numeric" })}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* Feature strip */}
         <div className="mt-14 w-full max-w-3xl">
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 divide-y sm:divide-y-0 divide-x-0 sm:divide-x divide-slate-200 rounded-2xl border border-slate-200 bg-white">
@@ -283,20 +257,6 @@ export default function LandingPage() {
           </div>
         </div>
 
-        {/* Supported protocols grid */}
-        <div className="mt-14 w-full max-w-3xl">
-          <p className="mb-4 text-center text-xs font-semibold uppercase tracking-widest text-slate-400">
-            Analyzes positions from
-          </p>
-          <div className="flex flex-wrap items-center justify-center gap-3">
-            {SUPPORTED_PROTOCOLS.map((p, i) => (
-              <ProtocolChip key={i} protocol={p} />
-            ))}
-          </div>
-          <p className="mt-4 text-center text-[11px] text-slate-400">
-            Base &amp; Ethereum supported. More chains coming soon.
-          </p>
-        </div>
       </main>
 
       {/* ── Footer ── */}
