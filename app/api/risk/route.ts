@@ -91,7 +91,7 @@ async function rpcCall(url: string, method: string, params: unknown[], timeoutMs
 }
 
 // Raw RPC shapes — only the fields we actually use downstream.
-type RawTx = { to: string | null; input: string; hash: string };
+type RawTx = { to: string | null; input: string; hash: string; value?: string };
 type RawLog = { address: string; topics: string[]; data: string };
 type RawReceipt = { logs: RawLog[] };
 
@@ -1817,6 +1817,47 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // 3a. Uniswap V4 special handling:
+    //   - Parse fee from the PoolManager Swap event (no per-pool contract to call fee() on)
+    //   - Detect native ETH as the second asset (tx.value > 0 means ETH is an input token)
+    const V4_POOL_MANAGER_ADDRESSES: Record<Chain, string> = {
+      base: "0x498581ff718922c3f8e6a244956af099b2652b2b",
+      ethereum: "0x000000000004444c5dc75cb358380d2e3de08a90",
+    };
+    const WETH_ADDRESSES: Record<Chain, string> = {
+      base: "0x4200000000000000000000000000000000000006",
+      ethereum: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    };
+    const v4PoolManager = V4_POOL_MANAGER_ADDRESSES[chain];
+    const isV4Tx = touchedAddresses.has(v4PoolManager);
+    let v4Fee: number | undefined;
+
+    if (isV4Tx) {
+      // V4 Swap event: Swap(bytes32 indexed id, address indexed sender, int128 amount0,
+      //   int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)
+      // fee is the 6th ABI word (uint24, right-padded in 32 bytes) in log.data
+      const V4_SWAP_TOPIC = ethers.id("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
+      for (const log of receipt.logs) {
+        if (log.address.toLowerCase() === v4PoolManager && log.topics[0] === V4_SWAP_TOPIC) {
+          const hex = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
+          if (hex.length >= 384) {
+            // Slot 5 (fee) starts at char 320; uint24 is the last 6 chars of the 64-char slot
+            const feeRaw = parseInt(hex.slice(378, 384), 16);
+            if (!isNaN(feeRaw) && feeRaw > 0) v4Fee = feeRaw / 10000;
+          }
+          break;
+        }
+      }
+
+      // If native ETH is an input (tx.value > 0), add WETH to tokenAddresses so the
+      // pair shows "WETH / TOKEN" instead of just "TOKEN"
+      const rawValue = (tx as unknown as { value?: string }).value;
+      const txValueWei = rawValue ? BigInt(rawValue) : BigInt(0);
+      if (txValueWei > BigInt(0)) {
+        tokenAddresses.add(WETH_ADDRESSES[chain].toLowerCase());
+      }
+    }
+
     // 3b. Read NFT position data (tickLower/tickUpper) for concentrated liquidity positions.
     // Find the minted tokenId from the ERC-721 Transfer-from-zero log, then call positions() on
     // the position manager to get the actual price range. This prevents AI from hallucinating it.
@@ -1902,7 +1943,7 @@ export async function POST(req: NextRequest) {
     // Seed fee from NFT position data if we already read it — more reliable than
     // waiting for autoDetectPoolType to read fee() from the pool (which can fail on
     // rate-limited public RPCs). Defined below after nftFeePercent is resolved.
-    let detectedFeePercent: number | undefined = nftFeePercent;
+    let detectedFeePercent: number | undefined = nftFeePercent ?? v4Fee;
     let detectedProtocol: string | undefined;
 
     // Determine which addresses belong in contract analysis.
