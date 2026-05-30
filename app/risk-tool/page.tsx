@@ -3,6 +3,17 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useState, useEffect } from "react";
+
+// Fix #2: sanitise any URL from the API before putting it in an href.
+// Rejects anything that isn't http:// or https:// — blocks javascript:, data:, etc.
+function safeUrl(url: string | undefined | null): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") return url;
+  } catch { /* invalid URL */ }
+  return undefined;
+}
 import ThemeToggle from "../components/ThemeToggle";
 import { saveRecentSearch } from "../page";
 
@@ -287,12 +298,15 @@ function countByLevel(checks: VulnerabilityCheck[]) {
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+type CustomAbiEntry = { address: string; abi: string };
+
 export default function RiskToolPage() {
   const [txHash, setTxHash] = useState("");
   const [chain, setChain] = useState<"ethereum" | "base">("base");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [customAbis, setCustomAbis] = useState<CustomAbiEntry[]>([]);
 
   // Pre-fill and auto-run when arriving via URL params (shareable links + "See a sample" link)
   useEffect(() => {
@@ -314,17 +328,25 @@ export default function RiskToolPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input: tx.trim(), chain: resolvedChain }),
     })
-      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(async (res) => {
+        let data: unknown;
+        try { data = await res.json(); } catch { throw new Error("The analysis timed out. Please try again."); }
+        return { ok: res.ok, data };
+      })
       .then(({ ok, data }) => {
         if (cancelled) return;
-        if (!ok) throw new Error(data.error ?? "Analysis failed");
-        setResult(data);
+        const d = data as Record<string, unknown>;
+        if (!ok) throw new Error((d.error as string) ?? "Analysis failed");
+        setResult(d as Parameters<typeof setResult>[0]);
       })
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : "Something went wrong"); })
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => { cancelled = true; };
   }, []);
+
+  // Helpers for custom ABI list
+  const validCustomAbis = customAbis.filter(ca => ca.address.startsWith("0x") && ca.abi.trim().length > 0);
 
   async function analyze() {
     if (!txHash.trim()) return;
@@ -335,11 +357,17 @@ export default function RiskToolPage() {
       const res = await fetch("/api/risk", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: txHash.trim(), chain }),
+        body: JSON.stringify({ input: txHash.trim(), chain, customAbis: validCustomAbis }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Analysis failed");
-      setResult(data);
+      let data: unknown;
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error("The analysis timed out. Please try again — it usually works on the second attempt.");
+      }
+      const d = data as Record<string, unknown>;
+      if (!res.ok) throw new Error((d.error as string) ?? "Analysis failed");
+      setResult(d as Parameters<typeof setResult>[0]);
       saveRecentSearch(txHash.trim(), chain);
       // Push shareable URL so the user can copy it from the address bar
       const params = new URLSearchParams({ input: txHash.trim(), chain });
@@ -365,6 +393,8 @@ export default function RiskToolPage() {
             analyze={analyze}
             loading={loading}
           />
+
+          <CustomAbiPanel entries={customAbis} setEntries={setCustomAbis} />
 
           {error && (
             <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -440,6 +470,110 @@ function Header() {
   );
 }
 
+// ─── Custom ABI Panel ─────────────────────────────────────────────────────────
+
+function CustomAbiPanel({
+  entries,
+  setEntries,
+}: {
+  entries: CustomAbiEntry[];
+  setEntries: (e: CustomAbiEntry[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  function addEntry() {
+    setEntries([...entries, { address: "", abi: "" }]);
+  }
+
+  function removeEntry(i: number) {
+    setEntries(entries.filter((_, idx) => idx !== i));
+  }
+
+  function updateEntry(i: number, field: keyof CustomAbiEntry, value: string) {
+    const next = entries.map((e, idx) => idx === i ? { ...e, [field]: value } : e);
+    setEntries(next);
+  }
+
+  const filled = entries.filter(e => e.address.startsWith("0x") && e.abi.trim().length > 0).length;
+
+  return (
+    <div className="mt-2">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700 transition-colors py-1"
+      >
+        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d={open ? "M4 10l4-4 4 4" : "M4 6l4 4 4-4"} />
+        </svg>
+        Advanced: Custom Contract ABI
+        {filled > 0 && (
+          <span className="ml-1 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
+            {filled}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className={`mt-2 rounded-2xl border border-slate-200 ${SURFACE} p-4`}>
+          <div className="mb-3">
+            <p className="text-sm font-semibold text-slate-800">Custom Contract ABI</p>
+            <p className="mt-0.5 text-xs text-slate-500">
+              Some tokens use non-standard function names to hide behaviour. Paste the contract address and its ABI — Claude will scan for honeypots, hidden mints, tax functions, and blacklist controls.
+            </p>
+          </div>
+
+          {entries.length === 0 && (
+            <p className="text-xs text-slate-400 italic mb-3">No ABIs added yet.</p>
+          )}
+
+          <div className="space-y-4">
+            {entries.map((entry, i) => (
+              <div key={i} className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-600">Contract {i + 1}</span>
+                  <button
+                    onClick={() => removeEntry(i)}
+                    className="text-[11px] text-slate-400 hover:text-red-500 transition-colors"
+                  >
+                    Remove
+                  </button>
+                </div>
+                <input
+                  value={entry.address}
+                  onChange={(e) => updateEntry(i, "address", e.target.value)}
+                  placeholder="Contract address (0x...)"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-mono text-xs text-slate-700 placeholder:text-slate-400 outline-none focus:border-blue-400"
+                />
+                <textarea
+                  value={entry.abi}
+                  onChange={(e) => updateEntry(i, "abi", e.target.value)}
+                  placeholder='Paste ABI JSON here, e.g. [{"type":"function","name":"transfer",...}]'
+                  rows={4}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-mono text-xs text-slate-700 placeholder:text-slate-400 outline-none focus:border-blue-400 resize-y"
+                />
+                {entry.address && entry.abi && (
+                  <p className="text-[11px] text-green-600 font-medium">✓ Ready — will be analysed by Claude</p>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <button
+            onClick={addEntry}
+            disabled={entries.length >= 5}
+            className="mt-3 flex items-center gap-1 rounded-lg border border-dashed border-slate-300 px-3 py-2 text-xs text-slate-500 hover:border-blue-400 hover:text-blue-600 transition-colors disabled:opacity-40"
+          >
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M8 3v10M3 8h10" />
+            </svg>
+            Add contract ABI {entries.length >= 5 ? "(max 5)" : ""}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SearchBar({
   chain,
   setChain,
@@ -505,7 +639,7 @@ function ActiveProposalsBanner({ proposals, protocol }: { proposals: GovernanceP
             {proposals.map((p) => (
               <a
                 key={p.id}
-                href={p.url}
+                href={safeUrl(p.url) ?? "#"}
                 target="_blank"
                 rel="noreferrer"
                 className="flex items-center justify-between gap-3 rounded-lg bg-yellow-100 px-3 py-1.5 hover:bg-yellow-200 transition-colors"
@@ -683,8 +817,8 @@ function ProtocolCard({ result }: { result: AnalysisResult }) {
       <div className="mt-auto flex h-[64px] items-center border-t border-slate-100">
         {result.protocolDocs ? (
           <div className="flex flex-wrap gap-1.5">
-            <DocChip href={result.protocolDocs.docs}>Docs</DocChip>
-            <DocChip href={result.protocolDocs.app}>App</DocChip>
+            <DocChip href={safeUrl(result.protocolDocs.docs) ?? "#"}>Docs</DocChip>
+            <DocChip href={safeUrl(result.protocolDocs.app) ?? "#"}>App</DocChip>
           </div>
         ) : (
           <span className={`text-[11px] ${MUTED}`}>{result.positionOverview.positionType}</span>
@@ -757,7 +891,7 @@ function ChainCard({ result }: { result: AnalysisResult }) {
       </div>
       <div className="mt-auto flex h-[64px] items-center border-t border-slate-100">
         <a
-          href={result.positionOverview.explorerTxUrl}
+          href={safeUrl(result.positionOverview.explorerTxUrl) ?? "#"}
           target="_blank"
           rel="noreferrer"
           className="text-[11px] hover:underline"
@@ -1112,7 +1246,7 @@ function CheckRow({ check }: { check: VulnerabilityCheck }) {
           )}
           {check.learnMoreUrl && (
             <a
-              href={check.learnMoreUrl}
+              href={safeUrl(check.learnMoreUrl) ?? "#"}
               target="_blank"
               rel="noreferrer"
               className="ml-9 mt-2 inline-block text-xs hover:underline"
@@ -1566,9 +1700,9 @@ function AuditList({ audits }: { audits: Audit[] }) {
                 </div>
                 <p className={`mt-0.5 text-xs ${MUTED}`}>{a.notes}</p>
               </div>
-              {a.url && (
+              {safeUrl(a.url) && (
                 <a
-                  href={a.url}
+                  href={safeUrl(a.url)}
                   target="_blank"
                   rel="noreferrer"
                   className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-medium hover:bg-slate-50 transition-colors"
@@ -1620,9 +1754,9 @@ function ExploitTimeline({ exploits }: { exploits: Exploit[] }) {
                 <span className={`text-[10px] ${MUTED}`}>{e.date}</span>
               </div>
               <p className={`mt-0.5 text-xs leading-relaxed ${MUTED}`}>{e.description}</p>
-              {e.url && (
+              {safeUrl(e.url) && (
                 <a
-                  href={e.url}
+                  href={safeUrl(e.url)}
                   target="_blank"
                   rel="noreferrer"
                   className="mt-1 inline-block text-[11px] hover:underline"
@@ -1660,7 +1794,7 @@ function Sources({ sources }: { sources: { title: string; url: string }[] }) {
                 <span className={`mt-0.5 shrink-0 text-[10px] font-semibold ${MUTED}`}>{i + 1}.</span>
                 <div className="min-w-0">
                   <a
-                    href={s.url}
+                    href={safeUrl(s.url) ?? "#"}
                     target="_blank"
                     rel="noreferrer"
                     className={`text-xs font-medium leading-snug hover:underline`}

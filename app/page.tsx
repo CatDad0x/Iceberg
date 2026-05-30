@@ -153,7 +153,8 @@ export default function LandingPage() {
   function handleAnalyze() {
     const hash = tx.trim();
     if (!hash) return;
-    saveRecentSearch(hash, chain);
+    // Fix #8: don't save to recents before we know the input is valid.
+    // The risk-tool page calls saveRecentSearch after a successful analysis.
     router.push(`/risk-tool?input=${encodeURIComponent(hash)}&chain=${chain}`);
   }
 

@@ -160,12 +160,16 @@ function tryDecodeV4PoolKey(txData: string): {
     const [actions, params] = coder.decode(["bytes", "bytes[]"], unlockData as string);
     const actionsHex = (actions as string).slice(2);
 
+    // Fix #7: i is a byte offset into the actions bytes, but params[] is indexed by action
+    // sequence number. Track them separately so non-trivial action sequences decode correctly.
+    let actionIndex = 0;
     for (let i = 0; i < actionsHex.length / 2; i++) {
       const action = parseInt(actionsHex.slice(i * 2, i * 2 + 2), 16);
+      const currentIndex = actionIndex++;
       if (action === MINT_POSITION_ACTION) {
         const [poolKey] = coder.decode(
           ["(address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)", "int24", "int24", "uint256", "uint128", "uint128", "address", "bytes"],
-          (params as string[])[i]
+          (params as string[])[currentIndex]
         );
         const key = poolKey as { currency0: string; currency1: string; fee: bigint };
         return {
@@ -1078,7 +1082,18 @@ ASSETS IN POSITION (already extracted):
 ${JSON.stringify(context.assets, null, 2)}
 
 SOURCE CODE WAS FETCHED FOR: ${Object.keys(context.sourceSnippets).join(", ") || "no contracts"}
-${Object.entries(context.sourceSnippets).map(([addr, src]) => `\n--- ${addr} ---\n${src.slice(0, 1200)}`).join("\n")}
+${Object.entries(context.sourceSnippets).map(([addr, src]) => {
+  // Fix #1: strip Solidity comments before interpolating source into the prompt.
+  // A malicious contract deployer can embed "IGNORE PRIOR INSTRUCTIONS" in a comment.
+  // Removing all // and /* */ comments eliminates that injection vector.
+  const stripped = src
+    .replace(/\/\*[\s\S]*?\*\//g, " ")   // block comments
+    .replace(/\/\/[^\n]*/g, "")           // line comments
+    .replace(/\s+/g, " ")                 // collapse whitespace
+    .trim()
+    .slice(0, 600);
+  return `\n--- ${addr} ---\n${stripped}`;
+}).join("\n")}
 
 Your final response must be ONLY a JSON object (no prose around it) in this exact schema. Do NOT copy or reuse the placeholder text below — every field must come from your analysis of this specific transaction.
 
@@ -1088,13 +1103,12 @@ Your final response must be ONLY a JSON object (no prose around it) in this exac
       "category": "Protocol Security | Pool Security | Governance & Control | Position Economics",
       "title": "Short descriptive title",
       "severity": "critical | high | medium | low | info",
-      "finding": "One scannable line under 100 chars — what you found",
-      "info": "2-4 sentences: what you found AND why a yield farmer should care",
-      "laymanTerms": "1-2 sentences in zero-jargon plain English, analogy from everyday life where helpful",
-      "learnMoreUrl": "A stable well-known reference URL (Etherscan/Basescan address page, protocol docs, audit report, Immunefi, rekt.news, DeFiLlama)"
+      "finding": "One scannable line under 70 chars — what you found",
+      "info": "1-2 sentences: what you found AND the practical risk to the yield farmer",
+      "learnMoreUrl": "stable reference URL — only include for high or critical severity findings"
     }
   ],
-  "narrative": "3-6 sentence plain-English risk summary based on your research",
+  "narrative": "3-4 sentence plain-English risk summary based on your research",
   "overallRisk": "critical | high | medium | low",
   "stackedRisks": ["compounding risk 1", "compounding risk 2"],
   "sources": [
@@ -1219,9 +1233,8 @@ Rules:
 - EVERY numbered checklist item above must appear in vulnerabilityChecks. Do not skip any. If item 19 (Bridge risk) does not apply because there are no bridged assets, still include it as severity "info" with finding "No bridged assets in this position". Minimum 14 checks expected.
 - "severity": "critical" / "high" / "medium" / "low" / "info". Use "low" for things that checked out fine (e.g. source verified, no exploits, DAO governance). Use "info" ONLY for the two items marked "always severity info" above (Impermanent Loss and Yield Source).
 - "finding" = one short scannable line (under 100 chars). For clean findings, start with the positive result: "Source code verified on Basescan", "No known exploits found", "Uniswap DAO governs via timelock".
-- "info" field = 2-4 sentences in plain English: what you found AND why a yield farmer should care.
-- "laymanTerms" = REQUIRED on every check. 1-2 sentences using zero jargon. Write as if explaining to a smart friend who has never used DeFi. Use an analogy from everyday life where it helps. Never use words like "protocol", "multisig", "proxy", "mempool", "oracle", "EOA", "timelock" — translate them into plain concepts instead.
-- "learnMoreUrl" = a stable well-known reference URL (Etherscan/Basescan address page, protocol docs, audit report repo, Immunefi page, rekt.news, DeFiLlama). Do NOT invent URLs.
+- "info" field = 1-2 sentences in plain English. Be concise — under 40 words.
+- "learnMoreUrl" = only include for high or critical severity findings. Must be a real, stable URL (Etherscan/Basescan, audit report, Immunefi, rekt.news). Omit entirely for low/info/medium findings to save space.
 - "sources" = array of { "title", "url" } objects for any authoritative references you used (protocol docs, audit reports, DeFiLlama, etc). Do not fabricate URLs.`;
 
   let finalText = "";
@@ -1229,7 +1242,7 @@ Rules:
   try {
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 2000,
+      max_tokens: 3000,
       messages: [{ role: "user", content: prompt }],
     });
 
@@ -1550,8 +1563,7 @@ async function analyzeContractAddress(address: string, chain: Chain, provider: e
 
   const label = factory?.name ?? (protocolContract ? `${protocolContract.protocol} ${protocolContract.role}` : undefined) ?? autoLabel ?? `Contract ${address.slice(0, 8)}...`;
 
-  // Round 3: meta + reserves
-  await new Promise((r) => setTimeout(r, 600));
+  // Round 3: meta + reserves (run in parallel — no artificial delay)
   const [meta, poolReserves, implAbi] = await Promise.all([
     getContractMeta(address, chain),
     fullPairInfo ? getPoolReserves(address, fullPairInfo, chain, provider, detectedProtocol) : Promise.resolve(undefined),
@@ -1570,9 +1582,9 @@ async function analyzeContractAddress(address: string, chain: Chain, provider: e
     functions: effectiveAbi ? categorizeFunctions(effectiveAbi) : undefined,
     deployedAt: meta.deployedAt,
     creatorAddress: meta.creatorAddress,
-    // autoLabel being set means we extracted useful identity from the contract (pair tokens,
-    // known-protocol fallback, etc.) — treat as verified even if factory() RPC failed.
-    isVerified: !!protocolContract || !!factory || abi !== null || poolType !== "unknown" || autoLabel !== undefined,
+    // Fix #4 (single-address path): only mark verified via registry hit or confirmed ABI fetch.
+    // autoLabel is a context-spill fallback, not evidence of source verification.
+    isVerified: !!protocolContract || !!factory || abi !== null,
     poolReserves,
   });
 
@@ -1735,11 +1747,17 @@ async function analyzeContractAddress(address: string, chain: Chain, provider: e
 
   riskScore = Math.max(0, Math.min(100, riskScore));
 
+  // Fix #6 (address path): same as tx path — derive label from live score to stay consistent on cache hits.
+  const derivedOverallRiskAddr: RiskLevel =
+    riskScore >= 80 ? "low" :
+    riskScore >= 60 ? "medium" :
+    riskScore >= 40 ? "high" : "critical";
+
   return NextResponse.json({
     txHash: address,
     chain,
     summary: `Analysis of ${label} on ${chain.charAt(0).toUpperCase() + chain.slice(1)}.`,
-    overallRisk: ai.overallRisk,
+    overallRisk: derivedOverallRiskAddr,
     riskScore,
     positionOverview,
     contracts: contractRisks,
@@ -1799,6 +1817,11 @@ export async function POST(req: NextRequest) {
 
     if (!rawInput || !chain) {
       return NextResponse.json({ error: "Input and chain are required." }, { status: 400 });
+    }
+    // Fix #3: validate chain against known values before any further processing
+    const VALID_CHAINS: Chain[] = ["ethereum", "base"];
+    if (!VALID_CHAINS.includes(chain as Chain)) {
+      return NextResponse.json({ error: "Invalid chain. Supported chains: ethereum, base." }, { status: 400 });
     }
     if (!isAddress && !isTxHash) {
       return NextResponse.json({ error: "Invalid input. Paste a transaction hash (0x... 66 chars) or a pool/gauge address (0x... 42 chars)." }, { status: 400 });
@@ -1989,7 +2012,8 @@ export async function POST(req: NextRequest) {
             const t0Asset = findKnownAsset(token0Addr, chain);
             const t1Asset = findKnownAsset(token1Addr, chain);
             const dec0 = t0Asset?.decimals ?? 18;
-            const dec1 = t1Asset?.decimals ?? 6;
+            // Fix #5: default to 18 (standard ERC-20), not 6 — using 6 produces 10^12× wrong price for 18-decimal tokens
+            const dec1 = t1Asset?.decimals ?? 18;
             // price = 1.0001^tick * 10^(dec0-dec1) gives token1 per token0 in human units
             const tickToPrice = (tick: number) => Math.pow(1.0001, tick) * Math.pow(10, dec0 - dec1);
             nftPriceRange = {
@@ -2221,7 +2245,9 @@ export async function POST(req: NextRequest) {
         directAbi: abi,
         implAddrForAbi,
         fullPairInfo,
-        isVerified: !!protocolContract || !!factory || abi !== null || poolType !== "unknown" || autoLabel !== undefined,
+        // Fix #4: autoLabel is a fallback string derived from context spill, not evidence of verification.
+        // Only treat a contract as verified if we positively identified it via registry OR fetched its ABI.
+        isVerified: !!protocolContract || !!factory || abi !== null,
         _detectedProtocol: protocolContract?.protocol ?? factory?.name?.replace(/ \(.+\)$/, "") ?? autoLabel?.replace(/ pool$/, "") ?? undefined,
         _detectedPair: fullPairInfo ? { token0Symbol: fullPairInfo.token0Symbol, token1Symbol: fullPairInfo.token1Symbol } : undefined,
         _detectedFeePercent: detectedFeePercent,
@@ -2603,11 +2629,19 @@ export async function POST(req: NextRequest) {
 
     riskScore = Math.max(0, Math.min(100, riskScore));
 
+    // Fix #6: derive overallRisk from the live riskScore so cache hits can't show a stale label.
+    // On a fresh AI call, ai.overallRisk and the score will agree. On a cache hit, the score
+    // is always recomputed from fresh on-chain findings, so we must re-derive the label.
+    const derivedOverallRisk: RiskLevel =
+      riskScore >= 80 ? "low" :
+      riskScore >= 60 ? "medium" :
+      riskScore >= 40 ? "high" : "critical";
+
     return NextResponse.json({
       txHash,
       chain,
       summary,
-      overallRisk: ai.overallRisk,
+      overallRisk: derivedOverallRisk,
       riskScore,
       positionOverview,
       contracts: contractRisks,
